@@ -191,6 +191,7 @@ struct App {
     bench_goal: f32,
     bench: Option<bench::Bench>,
     bench_summary: Option<String>,
+    bench_table: Vec<bench::BenchResult>,
 }
 
 impl App {
@@ -225,6 +226,7 @@ impl App {
             bench_goal: 0.5,
             bench: None,
             bench_summary: None,
+            bench_table: Vec::new(),
         }
     }
 
@@ -582,6 +584,29 @@ impl App {
                         if let Some(s) = &self.bench_summary {
                             ui.label(s.clone());
                         }
+                        if !self.bench_table.is_empty() {
+                            ui.separator();
+                            egui::Grid::new("bench_results")
+                                .striped(true)
+                                .min_col_width(70.0)
+                                .show(ui, |ui| {
+                                    ui.strong("Config");
+                                    ui.strong("fps");
+                                    ui.strong("score");
+                                    ui.end_row();
+                                    for r in &self.bench_table {
+                                        let label = if r.winner {
+                                            format!("★ {}", r.label)
+                                        } else {
+                                            r.label.clone()
+                                        };
+                                        ui.label(label);
+                                        ui.label(format!("{:.1}", r.fps));
+                                        ui.label(format!("{:.2}", r.score));
+                                        ui.end_row();
+                                    }
+                                });
+                        }
                         let connected =
                             matches!(self.conn, Conn::Active { connected: true, .. });
                         if ui
@@ -615,6 +640,7 @@ impl App {
         if let Some(winner) = b.tick(fps) {
             self.settings = winner;
             self.bench_summary = b.summary.clone();
+            self.bench_table = b.table.clone();
             self.bench = None;
             self.status = self.bench_summary.clone().unwrap_or_default();
         }

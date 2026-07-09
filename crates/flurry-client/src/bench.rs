@@ -32,6 +32,16 @@ pub struct Bench {
     phase: Phase,
     restore: Settings,
     pub summary: Option<String>,
+    /// Full result table, filled when the run completes.
+    pub table: Vec<BenchResult>,
+}
+
+#[derive(Clone)]
+pub struct BenchResult {
+    pub label: String,
+    pub fps: f32,
+    pub score: f32,
+    pub winner: bool,
 }
 
 /// Perceptual weight of a decimation mode.
@@ -97,6 +107,7 @@ impl Bench {
             phase: Phase::Settle(Instant::now() + SETTLE),
             restore: current,
             summary: None,
+            table: Vec::new(),
         }
     }
 
@@ -150,6 +161,20 @@ impl Bench {
                         best = i;
                     }
                 }
+                self.table = self
+                    .plan
+                    .iter()
+                    .zip(&self.results)
+                    .enumerate()
+                    .map(|(i, ((cfg, weight), fps))| BenchResult {
+                        label: format!("{} q={}", mode_name(cfg), cfg.quality),
+                        fps: *fps,
+                        score: (1.0 - g) * (fps / FPS_TARGET).min(1.0) + g * weight,
+                        winner: i == best,
+                    })
+                    .collect();
+                self.table
+                    .sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
                 let (win, _) = self.plan[best];
                 self.summary = Some(format!(
                     "Winner: {} q={} — {:.1} fps (score {:.2})",
