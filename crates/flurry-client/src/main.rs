@@ -318,6 +318,10 @@ impl App {
                     {
                         let _ = worker.cmds.send(Cmd::SetStatsEnabled(true));
                     }
+                    // Prefer protocol v2 whenever the sysmodule offers it.
+                    if a.has(feature::V2) {
+                        let _ = worker.cmds.send(Cmd::SetV2Enabled(true));
+                    }
                 }
                 Event::Screen { bottom, image, bytes, chunk } => {
                     self.meter.push(bytes, bottom, chunk);

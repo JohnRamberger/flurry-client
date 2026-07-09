@@ -14,7 +14,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::Duration;
 
 use flurry_proto::legacy::{self, pkt, ImageInfo, ScreenSet};
-use flurry_proto::PORT;
+use flurry_proto::{v2, PORT};
 
 /// UI → worker.
 pub enum Cmd {
@@ -28,6 +28,7 @@ pub enum Cmd {
     SetStripSleep(u8),
     SetDownscale(bool),
     SetStatsEnabled(bool),
+    SetV2Enabled(bool),
     Disconnect,
 }
 
@@ -120,6 +121,7 @@ pub fn spawn(addr: String, ctx: egui::Context, quality: u8, screen: ScreenSet, i
                     Cmd::SetStripSleep(ms) => (legacy::encode_strip_sleep(ms), false),
                     Cmd::SetDownscale(d) => (legacy::encode_downscale(d), false),
                     Cmd::SetStatsEnabled(e) => (legacy::encode_stats_enabled(e), false),
+                    Cmd::SetV2Enabled(e) => (legacy::encode_v2_enable(e), false),
                     Cmd::Disconnect => (legacy::encode_disconnect(), true),
                 };
                 let _ = wr.write_all(&bytes);
@@ -217,6 +219,87 @@ impl ScreenBuf {
     }
 }
 
+impl ScreenBuf {
+    /// Paste a protocol-v2 region (see `flurry_proto::v2` for the layout:
+    /// screen-space rect, framebuffer-ordered pixel data — `w` columns
+    /// left→right, each column bottom→top).
+    fn paste_v2_region(&mut self, r: &v2::Region<'_>) -> Result<(), String> {
+        let (rx, ry, rw, rh) = (r.x as usize, r.y as usize, r.w as usize, r.h as usize);
+        let w = self.image.size[0];
+        if rx + rw > w || ry + rh > 240 || rw == 0 || rh == 0 {
+            return Err(format!("region out of bounds: {rx},{ry} {rw}x{rh}"));
+        }
+        let interlaced = r.flags & v2::region_flags::INTERLACED != 0;
+        let field_b = (r.flags & v2::region_flags::FIELD_B != 0) as usize;
+        // Vertical stride between successive samples in a column, and the
+        // block each sample paints (fills interlace/downscale gaps).
+        let scale = if matches!(r.codec, v2::Codec::Raw565Half) { 2 } else { 1 };
+        let ystep = scale * if interlaced { 2 } else { 1 };
+
+        let mut put = |col: usize, sample: usize, px: egui::Color32| {
+            let x0 = rx + col * scale;
+            // Column data runs screen-bottom → top.
+            let y_hi = (ry + rh).saturating_sub(1 + sample * ystep + field_b * scale);
+            for dx in 0..scale {
+                let x = x0 + dx;
+                if x >= w {
+                    break;
+                }
+                for dy in 0..ystep {
+                    let y = match y_hi.checked_sub(dy) {
+                        Some(y) if y >= ry => y,
+                        _ => continue,
+                    };
+                    self.image.pixels[y * w + x] = px;
+                }
+            }
+        };
+
+        match r.codec {
+            v2::Codec::Raw565 | v2::Codec::Raw565Half => {
+                let cols = rw / scale;
+                let colpx = (rh / scale) / if interlaced { 2 } else { 1 };
+                if r.data.len() < cols * colpx * 2 {
+                    return Err("raw region data short".into());
+                }
+                for i in 0..cols {
+                    for j in 0..colpx {
+                        let o = (i * colpx + j) * 2;
+                        let v = u16::from_le_bytes([r.data[o], r.data[o + 1]]);
+                        // Channel order mirrors the legacy BGR finding; if
+                        // raw regions come out swapped, flip r/b here.
+                        let b = ((v >> 11) & 0x1F) as u8;
+                        let g = ((v >> 5) & 0x3F) as u8;
+                        let rr = (v & 0x1F) as u8;
+                        put(i, j, egui::Color32::from_rgb(rr << 3, g << 2, b << 3));
+                    }
+                }
+            }
+            v2::Codec::Jpeg => {
+                let mut dec = zune_jpeg::JpegDecoder::new(std::io::Cursor::new(r.data));
+                let rgb = dec.decode().map_err(|e| format!("jpeg: {e}"))?;
+                let Some((iw, ih)) = dec.dimensions() else {
+                    return Err("jpeg: no dimensions".into());
+                };
+                if rgb.len() < iw * ih * 3 {
+                    return Err("jpeg: short decode".into());
+                }
+                // Image rows = columns of the region; image cols = pixels
+                // along each column (possibly one interlace field).
+                for row in 0..ih.min(rw) {
+                    for c in 0..iw {
+                        let o = (row * iw + c) * 3;
+                        // BGR framebuffer, encoded as if RGB: swap back.
+                        let px = egui::Color32::from_rgb(rgb[o + 2], rgb[o + 1], rgb[o]);
+                        put(row, c, px);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 fn read_loop(mut stream: TcpStream, emit: &dyn Fn(Event)) -> String {
     let mut top = ScreenBuf::new(400);
     let mut bottom = ScreenBuf::new(320);
@@ -227,6 +310,41 @@ fn read_loop(mut stream: TcpStream, emit: &dyn Fn(Event)) -> String {
         if let Err(e) = stream.read_exact(&mut header) {
             return format!("connection closed: {e}");
         }
+
+        // Protocol v2 SFRAME shares the 8-byte header size; the type byte
+        // 0x90 sits outside the legacy packet-type space.
+        if header[0] == v2::SFRAME {
+            let hdr = match v2::parse_sframe_header(&header) {
+                Ok(h) => h,
+                Err(e) => return format!("v2 protocol error: {e}"),
+            };
+            let mut payload = vec![0u8; hdr.payload_len as usize];
+            if let Err(e) = stream.read_exact(&mut payload) {
+                return format!("connection closed mid-sframe: {e}");
+            }
+            let sf = match v2::parse_sframe_payload(&payload) {
+                Ok(s) => s,
+                Err(e) => return format!("v2 payload error: {e}"),
+            };
+            let bottom_screen = hdr.screen == 1;
+            if sf.regions.is_empty() {
+                continue; // heartbeat pass
+            }
+            let buf = if bottom_screen { &mut bottom } else { &mut top };
+            for region in &sf.regions {
+                if let Err(e) = buf.paste_v2_region(region) {
+                    emit(Event::Info(format!("v2 region error: {e}")));
+                }
+            }
+            emit(Event::Screen {
+                bottom: bottom_screen,
+                image: buf.image.clone(),
+                bytes: v2::SFRAME_HEADER_LEN + payload.len(),
+                chunk: None, // one SFRAME = one capture pass = one "frame"
+            });
+            continue;
+        }
+
         let info = match legacy::parse_header(&header) {
             Ok(i) => i,
             Err(e) => return format!("protocol error: {e}"),
