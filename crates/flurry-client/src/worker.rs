@@ -279,11 +279,14 @@ impl ScreenBuf {
                     for j in 0..colpx {
                         let o = (i * colpx + j) * 2;
                         let v = u16::from_le_bytes([r.data[o], r.data[o + 1]]);
-                        // Channel order mirrors the legacy BGR finding; if
-                        // raw regions come out swapped, flip r/b here.
-                        let b = ((v >> 11) & 0x1F) as u8;
+                        // GSP RGB565 packs RED in the high bits (confirmed
+                        // by screenshot forensics: ice-blue 120,200,255
+                        // rendered as its channel-mirror 248,200,120 orange
+                        // under the previous B-high assumption). The JPEG
+                        // path's BGR swap is a separate pipeline quirk.
+                        let rr = ((v >> 11) & 0x1F) as u8;
                         let g = ((v >> 5) & 0x3F) as u8;
-                        let rr = (v & 0x1F) as u8;
+                        let b = (v & 0x1F) as u8;
                         put(i, j, egui::Color32::from_rgb(rr << 3, g << 2, b << 3));
                     }
                 }
