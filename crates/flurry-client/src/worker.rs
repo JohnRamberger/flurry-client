@@ -350,8 +350,19 @@ fn read_loop(mut stream: TcpStream, emit: &dyn Fn(Event)) -> String {
             // Stage-2 sysmodules send one strip per SFRAME; expose its
             // strip index (x / width) so the fps meter can infer strips-
             // per-frame. True multi-region passes count as whole frames.
+            // Strip index inference only for genuine full-height strip
+            // regions; dirty rects (Stage 3) have arbitrary geometry and
+            // must not poison the strips-per-frame estimate.
             let chunk = match sf.regions.as_slice() {
-                [only] if only.w > 0 && only.w < 400 => Some((only.x / only.w) as u8),
+                [only]
+                    if only.y == 0
+                        && only.h == 240
+                        && only.w > 0
+                        && only.w < 400
+                        && only.x % only.w == 0 =>
+                {
+                    Some((only.x / only.w) as u8)
+                }
                 _ => None,
             };
             let rects = sf.regions.iter().map(|r| [r.x, r.y, r.w, r.h]).collect();

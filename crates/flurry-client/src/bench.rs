@@ -36,6 +36,8 @@ pub struct StatsSnap {
     pub send: f32,
     pub sent: f32,
     pub skip: f32,
+    pub dma: f32,
+    pub torn: f32,
 }
 
 /// What to sweep.
@@ -269,6 +271,8 @@ impl Bench {
                     send: ss.iter().map(|s| s.send).sum::<f32>() / sn,
                     sent: ss.iter().map(|s| s.sent).sum::<f32>() / sn,
                     skip: ss.iter().map(|s| s.skip).sum::<f32>() / sn,
+                    dma: ss.iter().map(|s| s.dma).sum::<f32>() / sn,
+                    torn: ss.iter().map(|s| s.torn).sum::<f32>() / sn,
                 };
                 self.results.push((fps_avg, bot_avg, stats_avg, sharp, block));
                 self.idx += 1;

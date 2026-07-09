@@ -209,6 +209,8 @@ fn parse_stats(text: &str) -> bench::StatsSnap {
             "send" => s.send = f,
             "sent" => s.sent = f,
             "skip" => s.skip = f,
+            "dma" => s.dma = f,
+            "torn" => s.torn = f,
             _ => {}
         }
     }
@@ -714,8 +716,10 @@ impl App {
                                     ui.strong("sharp");
                                     ui.strong("block");
                                     ui.strong("enc ms/s");
+                                    ui.strong("dma ms/s");
                                     ui.strong("send ms/s");
                                     ui.strong("skip/s");
+                                    ui.strong("torn/s");
                                     ui.strong("score");
                                     ui.end_row();
                                     for r in &self.bench_table {
@@ -730,8 +734,10 @@ impl App {
                                         ui.label(format!("{:.2}", r.sharp));
                                         ui.label(format!("{:.2}", r.block));
                                         ui.label(format!("{:.0}", r.stats.enc));
+                                        ui.label(format!("{:.0}", r.stats.dma));
                                         ui.label(format!("{:.0}", r.stats.send));
                                         ui.label(format!("{:.0}", r.stats.skip));
+                                        ui.label(format!("{:.0}", r.stats.torn));
                                         ui.label(format!("{:.2}", r.score));
                                         ui.end_row();
                                     }
