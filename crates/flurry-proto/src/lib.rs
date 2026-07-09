@@ -9,6 +9,7 @@
 //! little-endian.
 
 pub mod legacy;
+pub mod v2;
 
 /// TCP port the 3DS listens on.
 pub const PORT: u16 = 6464;

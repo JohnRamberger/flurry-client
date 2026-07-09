@@ -43,6 +43,7 @@ pub mod setting {
     pub const STRIP_SLEEP: u8 = 0x0A; // u8 payload: ms pause between strips (0-20)
     pub const DOWNSCALE: u8 = 0x0B; // u8 payload: bool — quarter-res mode (Old 3DS)
     pub const STATS_ENABLE: u8 = 0x0C; // u8 payload: bool — 1 Hz perf stats packets
+    pub const V2_ENABLE: u8 = 0x0F; // u8 payload: bool — switch to protocol v2 framing
 }
 
 /// Feature bits carried by the [`meta::ANNOUNCE`] packet.
@@ -56,6 +57,13 @@ pub mod feature {
     /// Stats are opt-in via [`setting::STATS_ENABLE`]. Sysmodules without
     /// this bit but with an announce stream stats unconditionally.
     pub const STATS_TOGGLE: u8 = 1 << 6;
+    /// Protocol v2 (SFRAME region streaming) available via
+    /// [`setting::V2_ENABLE`].
+    pub const V2: u8 = 1 << 7;
+}
+
+pub fn encode_v2_enable(on: bool) -> Vec<u8> {
+    packet(pkt::SETTING, setting::V2_ENABLE, &[on as u8])
 }
 
 /// Legacy screen-select values (1-based, unlike v1).
