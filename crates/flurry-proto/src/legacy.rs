@@ -1,0 +1,213 @@
+//! Legacy HzMod/ChirunoMod protocol (PROTOCOL.md Appendix A).
+//!
+//! What the pre-rewrite Flurry sysmodule speaks on the wire. Client-side
+//! view only: encode PC→3DS control messages, decode 3DS→PC packets.
+//! Kept alongside the v1 codec so the client can talk to sysmodules built
+//! before the protocol rewrite.
+//!
+//! Framing: `[type:u8][subtype:u8][subtypeB:u8][unused:u8][size:u32 LE]`
+//! then `size` payload bytes.
+
+use crate::{Error, Result};
+
+pub const HEADER_LEN: usize = 8;
+/// New-3DS send buffer is 448 KB; anything bigger means desync.
+pub const MAX_PAYLOAD: u32 = 448 * 1024;
+
+/// Packet type bytes.
+pub mod pkt {
+    /// 3DS → PC: encoded image.
+    pub const IMAGE: u8 = 0x01;
+    /// PC → 3DS: start streaming.
+    pub const INIT: u8 = 0x02;
+    /// PC → 3DS: disconnect.
+    pub const DISCONNECT: u8 = 0x03;
+    /// PC → 3DS: setting (subtype selects which).
+    pub const SETTING: u8 = 0x04;
+    /// Both directions: debug/stats/error text (subtype selects which).
+    pub const META: u8 = 0xFF;
+}
+
+/// `SETTING` subtypes.
+pub mod setting {
+    pub const QUALITY: u8 = 0x01; // u8 payload, 1–100
+    pub const CPU_CAP: u8 = 0x02; // u8 payload; dummied out on the 3DS
+    pub const SCREEN: u8 = 0x03; // u8 payload: 1 top, 2 bottom, 3 both
+    pub const FORMAT: u8 = 0x04; // u8 payload: 0 JPEG, 1 TGA
+    pub const INTERLACE: u8 = 0x05; // u8 payload: bool
+}
+
+/// Legacy screen-select values (1-based, unlike v1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScreenSet {
+    Top = 1,
+    Bottom = 2,
+    Both = 3,
+}
+
+fn packet(ptype: u8, subtype: u8, payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(HEADER_LEN + payload.len());
+    out.push(ptype);
+    out.push(subtype);
+    out.extend_from_slice(&[0, 0]);
+    out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    out.extend_from_slice(payload);
+    out
+}
+
+pub fn encode_init() -> Vec<u8> {
+    packet(pkt::INIT, 0, &[])
+}
+
+pub fn encode_disconnect() -> Vec<u8> {
+    packet(pkt::DISCONNECT, 0, &[])
+}
+
+pub fn encode_quality(quality: u8) -> Vec<u8> {
+    packet(pkt::SETTING, setting::QUALITY, &[quality.clamp(1, 100)])
+}
+
+pub fn encode_screen(screen: ScreenSet) -> Vec<u8> {
+    packet(pkt::SETTING, setting::SCREEN, &[screen as u8])
+}
+
+/// `false` = JPEG, `true` = TGA.
+pub fn encode_format_tga(tga: bool) -> Vec<u8> {
+    packet(pkt::SETTING, setting::FORMAT, &[tga as u8])
+}
+
+pub fn encode_interlace(on: bool) -> Vec<u8> {
+    packet(pkt::SETTING, setting::INTERLACE, &[on as u8])
+}
+
+/// Parsed legacy framing header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PacketInfo {
+    pub ptype: u8,
+    pub subtype: u8,
+    pub subtype_b: u8,
+    pub payload_len: u32,
+}
+
+pub fn parse_header(buf: &[u8]) -> Result<PacketInfo> {
+    if buf.len() < HEADER_LEN {
+        return Err(Error::Truncated);
+    }
+    let payload_len = u32::from_le_bytes(buf[4..8].try_into().unwrap());
+    if payload_len > MAX_PAYLOAD {
+        return Err(Error::PayloadTooLarge(payload_len));
+    }
+    Ok(PacketInfo {
+        ptype: buf[0],
+        subtype: buf[1],
+        subtype_b: buf[2],
+        payload_len,
+    })
+}
+
+/// Decoded metadata of an `IMAGE` packet, unpacked from the subtype flag
+/// bits and `subtypeB`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageInfo {
+    /// 0 = top, 1 = bottom (subtype bit 4).
+    pub bottom: bool,
+    /// Subtype bit 3: payload is TGA instead of JPEG.
+    pub tga: bool,
+    /// GSP source pixel format (subtype bits 0–2).
+    pub pixfmt: u8,
+    /// Subtype bit 5.
+    pub interlaced: bool,
+    /// Subtype bit 6 (only meaningful when `interlaced`).
+    pub interlace_phase: bool,
+    /// Old-3DS chunk index 0–7; `None` when the packet is a full frame.
+    pub chunk: Option<u8>,
+}
+
+impl ImageInfo {
+    pub fn from_packet(info: &PacketInfo) -> ImageInfo {
+        ImageInfo {
+            bottom: info.subtype & 0b0001_0000 != 0,
+            tga: info.subtype & 0b0000_1000 != 0,
+            pixfmt: info.subtype & 0b0000_0111,
+            interlaced: info.subtype & 0b0010_0000 != 0,
+            interlace_phase: info.subtype & 0b0100_0000 != 0,
+            // Old 3DS sets subtypeB = 0b1000 + chunk_index.
+            chunk: (info.subtype_b & 0b0000_1000 != 0).then_some(info.subtype_b & 0b0111),
+        }
+    }
+
+    /// Physical screen width in pixels (400 top / 320 bottom).
+    pub fn screen_width(&self) -> usize {
+        if self.bottom {
+            320
+        } else {
+            400
+        }
+    }
+}
+
+/// `META` (0xFF) subtypes from the 3DS.
+pub mod meta {
+    pub const ERROR: u8 = 0x00;
+    pub const STATS: u8 = 0x03;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn control_packets_match_wire_format() {
+        assert_eq!(encode_init(), vec![0x02, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(encode_disconnect(), vec![0x03, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(
+            encode_quality(70),
+            vec![0x04, 0x01, 0, 0, 1, 0, 0, 0, 70]
+        );
+        assert_eq!(
+            encode_screen(ScreenSet::Both),
+            vec![0x04, 0x03, 0, 0, 1, 0, 0, 0, 3]
+        );
+        assert_eq!(
+            encode_interlace(true),
+            vec![0x04, 0x05, 0, 0, 1, 0, 0, 0, 1]
+        );
+        assert_eq!(encode_quality(0)[8], 1, "quality clamped to 1..=100");
+    }
+
+    #[test]
+    fn image_flags_unpack() {
+        // Bottom screen, JPEG, RGB565, interlaced, phase set.
+        let info = PacketInfo {
+            ptype: pkt::IMAGE,
+            subtype: 0b0111_0010,
+            subtype_b: 0,
+            payload_len: 4,
+        };
+        let img = ImageInfo::from_packet(&info);
+        assert!(img.bottom && img.interlaced && img.interlace_phase && !img.tga);
+        assert_eq!(img.pixfmt, 2);
+        assert_eq!(img.chunk, None);
+        assert_eq!(img.screen_width(), 320);
+
+        // Old-3DS chunk 5, top screen, TGA.
+        let info = PacketInfo {
+            ptype: pkt::IMAGE,
+            subtype: 0b0000_1001,
+            subtype_b: 0b0000_1101,
+            payload_len: 4,
+        };
+        let img = ImageInfo::from_packet(&info);
+        assert!(!img.bottom && img.tga);
+        assert_eq!(img.chunk, Some(5));
+    }
+
+    #[test]
+    fn header_roundtrip() {
+        let p = encode_quality(90);
+        let info = parse_header(&p).unwrap();
+        assert_eq!(info.ptype, pkt::SETTING);
+        assert_eq!(info.subtype, setting::QUALITY);
+        assert_eq!(info.payload_len, 1);
+    }
+}

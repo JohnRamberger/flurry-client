@@ -1,0 +1,9 @@
+[package]
+name = "flurry-proto"
+description = "Flurry streaming protocol codec (PROTOCOL.md v1 draft)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]

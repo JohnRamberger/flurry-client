@@ -1,0 +1,13 @@
+[package]
+name = "flurry-client"
+description = "Flurry PC client — 3DS screen streaming viewer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+eframe = "0.35.0"
+egui = "0.35.0"
+flurry-proto = { path = "../flurry-proto" }
+zune-jpeg = "0.5.15"
