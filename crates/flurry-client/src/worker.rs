@@ -173,7 +173,9 @@ impl ScreenBuf {
             }
             for c in 0..iw {
                 let i = (r * iw + c) * 3;
-                let px = egui::Color32::from_rgb(rgb[i], rgb[i + 1], rgb[i + 2]);
+                // 3DS framebuffers are BGR; the sysmodule JPEG-encodes the
+                // raw bytes as if RGB, so swap back here.
+                let px = egui::Color32::from_rgb(rgb[i + 2], rgb[i + 1], rgb[i]);
                 let y = 239usize.saturating_sub(c * step);
                 self.image.pixels[y * w + x] = px;
                 if interlaced && y > 0 {
