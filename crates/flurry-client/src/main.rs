@@ -418,9 +418,23 @@ impl App {
             self.settings.screen_set(),
             self.settings.interlace,
         );
+        // `sent` must reflect the DEVICE's state, not ours: the worker's
+        // hello covers quality/screen/interlace, but every extension knob
+        // starts at the sysmodule default. Diffing against our own defaults
+        // silently skipped pushing them (bench measured chunks=8/sleep=5ms/
+        // skip-off while labeling otherwise).
+        let device_state = Settings {
+            strip_skip: false,
+            refresh_interval: 64,
+            fps_cap: 0,
+            chunks: 8,
+            strip_sleep: 5,
+            downscale: false,
+            ..self.settings
+        };
         self.conn = Conn::Active {
             worker,
-            sent: self.settings,
+            sent: device_state,
             connected: false,
             caps: None,
         };
@@ -670,6 +684,7 @@ impl App {
                                     ui.strong("Config");
                                     ui.strong("fps");
                                     ui.strong("sharp");
+                                    ui.strong("block");
                                     ui.strong("enc ms/s");
                                     ui.strong("send ms/s");
                                     ui.strong("skip/s");
@@ -684,6 +699,7 @@ impl App {
                                         ui.label(label);
                                         ui.label(format!("{:.1}", r.fps));
                                         ui.label(format!("{:.2}", r.sharp));
+                                        ui.label(format!("{:.2}", r.block));
                                         ui.label(format!("{:.0}", r.stats.enc));
                                         ui.label(format!("{:.0}", r.stats.send));
                                         ui.label(format!("{:.0}", r.stats.skip));

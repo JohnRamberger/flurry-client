@@ -74,6 +74,8 @@ pub struct BenchResult {
     pub stats: StatsSnap,
     /// Measured no-reference sharpness (relative across the run).
     pub sharp: f32,
+    /// Measured blockiness (1.0 = no 8-px grid artifacts).
+    pub block: f32,
     pub score: f32,
     pub winner: bool,
 }
@@ -286,7 +288,7 @@ impl Bench {
                 self.table = (0..self.plan.len())
                     .map(|i| {
                         let (cfg, _) = &self.plan[i];
-                        let (fps, stats, sharp, _) = self.results[i];
+                        let (fps, stats, sharp, block) = self.results[i];
                         BenchResult {
                             label: format!(
                                 "{} q={} c={}",
@@ -297,6 +299,7 @@ impl Bench {
                             fps,
                             stats,
                             sharp,
+                            block,
                             score: (1.0 - g) * (fps / FPS_TARGET).min(1.0)
                                 + g * quality_of(i),
                             winner: i == best,
