@@ -1127,10 +1127,19 @@ impl App {
                         s.downscale = mode == 2;
                     }
                     SettingsTab::Performance => {
-                        // Capture chunking is no longer user-facing: 4 wins
-                        // every measurement and the sysmodule falls back to
-                        // 8 automatically when memory is short. The wire
-                        // setting and the benchmark A/B sweep remain.
+                        knob(ui, ok(feature::CHUNKS), "How many vertical strips each screen is captured in (Old 3DS). 1 = whole screen at once = no capture tearing on fast motion, but a heavier per-frame encode; 4 = fastest throughput.", |ui| {
+                            egui::ComboBox::from_label("Capture chunks")
+                                .selected_text(match s.chunks {
+                                    1 => "1 (no tearing)",
+                                    8 => "8 (legacy)",
+                                    _ => "4 (fastest)",
+                                })
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut s.chunks, 1u8, "1 (no tearing)");
+                                    ui.selectable_value(&mut s.chunks, 4u8, "4 (fastest)");
+                                    ui.selectable_value(&mut s.chunks, 8u8, "8 (legacy)");
+                                });
+                        });
                         knob(ui, ok(feature::STRIP_SLEEP), "Pause between strips. 0 = fastest; raise a little if the console's WiFi or games get unstable while streaming.", |ui| {
                             ui.add(egui::Slider::new(&mut s.strip_sleep, 0..=20).text("Strip sleep (ms)"));
                         });
