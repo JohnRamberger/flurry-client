@@ -39,11 +39,6 @@ fn main() -> eframe::Result {
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
-    /// Master quality↔FPS balance, 0.0 = max FPS … 1.0 = max quality.
-    /// Drives the knobs below unless `custom`.
-    pub master: f32,
-    /// User touched an advanced knob; master slider stops driving them.
-    pub custom: bool,
     pub quality: u8,
     /// Legacy screen-select value: 1 top, 2 bottom, 3 both.
     pub screen: u8,
@@ -65,9 +60,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        let mut s = Settings {
-            master: 0.5,
-            custom: false,
+        Settings {
             quality: 70,
             screen: 1,
             interlace: false,
@@ -80,30 +73,11 @@ impl Default for Settings {
             strip_sleep: 0,
             downscale: false,
             cell_size: 0,
-        };
-        s.apply_master();
-        s
+        }
     }
 }
 
 impl Settings {
-    /// Preset curve: derive the individual knobs from the master slider.
-    fn apply_master(&mut self) {
-        let m = self.master.clamp(0.0, 1.0);
-        // Quality 40 (fps end) … 95 (quality end).
-        self.quality = (40.0 + m * 55.0).round() as u8;
-        // Interlace on the fps-priority half.
-        self.interlace = m < 0.5;
-        // Uncapped fps toward the fps end; give the encoder breathing room
-        // (and thus better quality per frame) toward the quality end.
-        self.fps_cap = if m < 0.75 { 0 } else { 24 };
-        // Far fps end: quarter-res for ~4x encode speedup.
-        self.downscale = m < 0.25;
-        // Strip skip always pays; refresh faster when quality-focused.
-        self.strip_skip = true;
-        self.refresh_interval = if m < 0.5 { 64 } else { 32 };
-    }
-
     fn screen_set(&self) -> ScreenSet {
         match self.screen {
             2 => ScreenSet::Bottom,
@@ -449,10 +423,6 @@ impl App {
                 sent.cell_size = s.cell_size;
             }
         }
-        // Master-slider bookkeeping fields aren't wire state; mirror them so
-        // the cheap equality early-out above keeps working.
-        sent.master = s.master;
-        sent.custom = s.custom;
     }
 
     fn caps(&self) -> Option<Announce> {
@@ -987,9 +957,7 @@ impl App {
                     }
                     SettingsTab::Debug => {}
                 }
-                if *s != before {
-                    s.custom = true;
-                }
+                let _ = before; // settings apply live via push_settings
 
                 if self.settings_tab == SettingsTab::Debug {
                     if ui
@@ -1030,15 +998,6 @@ impl App {
 
     fn controls_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("Stream");
-        let master = ui.add(
-            egui::Slider::new(&mut self.settings.master, 0.0..=1.0)
-                .show_value(false)
-                .text("FPS ↔ Quality"),
-        );
-        if master.changed() {
-            self.settings.custom = false;
-            self.settings.apply_master();
-        }
         let mut screen = self.settings.screen;
         egui::ComboBox::from_label("Screen")
             .selected_text(match screen {

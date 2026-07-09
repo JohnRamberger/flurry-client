@@ -127,7 +127,6 @@ impl Bench {
         let has = |bit| caps.is_some_and(|a| a.has(bit));
 
         let mut base = current;
-        base.custom = true;
         // Both screens: the static bottom screen exercises strip skip and
         // the goal fps is the combined rate.
         base.screen = 3;
