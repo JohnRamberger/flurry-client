@@ -290,7 +290,13 @@ impl Bench {
                 let quality_of = |i: usize| -> f32 {
                     let (_, _, _, sharp, block) = self.results[i];
                     if max_sharp > 0.01 {
-                        (sharp / max_sharp - 0.15 * (block - 1.0).clamp(0.0, 2.0)).max(0.0)
+                        // Measured sharpness counts JPEG ringing as detail
+                        // (q45 ranked above q90), so blend in a JPEG-quality
+                        // prior and penalize measured blockiness harder.
+                        let q = self.plan[i].0.quality as f32 / 100.0;
+                        (0.6 * sharp / max_sharp + 0.4 * q
+                            - 0.3 * (block - 1.0).clamp(0.0, 2.0))
+                        .max(0.0)
                     } else {
                         self.plan[i].1
                     }
