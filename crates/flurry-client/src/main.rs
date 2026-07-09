@@ -702,11 +702,67 @@ impl App {
                 ui.label("Sweeps decimation modes and JPEG quality on the live\nconnection and picks the best fit for your goal.");
                 ui.small("Tip: open the Flurry app on the 3DS — its moving test\npattern gives worst-case (honest) fps numbers.");
                 ui.separator();
-                ui.add(
-                    egui::Slider::new(&mut self.bench_goal, 0.0..=1.0)
-                        .show_value(false)
-                        .text("FPS ↔ Quality"),
-                );
+                // Goal and motion only matter at SCORING time, so they stay
+                // live during and after a run — changing them re-ranks the
+                // existing table without re-running. Depth shapes the plan,
+                // so it locks while running.
+                if ui
+                    .add(
+                        egui::Slider::new(&mut self.bench_goal, 0.0..=1.0)
+                            .show_value(false)
+                            .text("FPS ↔ Quality"),
+                    )
+                    .changed()
+                    && self.bench.is_none()
+                {
+                    self.rescore_bench_table();
+                }
+                let running = self.bench.is_some();
+                ui.add_enabled_ui(!running, |ui| {
+                    let depth_name = ["Quick", "Standard", "Thorough", "Exhaustive"]
+                        [self.bench_depth.min(3) as usize];
+                    let n = bench::plan_configs(self.bench_depth, self.settings, self.caps())
+                        .len()
+                        + 1; // + the measured current-settings baseline
+                    ui.add(
+                        egui::Slider::new(&mut self.bench_depth, 0..=3)
+                            .show_value(false)
+                            .text(format!(
+                                "{depth_name}: {n} configs ≈ {:.0} s",
+                                bench::Bench::estimate(n).as_secs_f32()
+                            )),
+                    );
+                });
+                {
+                    let prev_motion = self.bench_motion;
+                    egui::ComboBox::from_label("Moving content")
+                        .selected_text(match self.bench_motion {
+                            bench::Motion::TopMoves => "Top screen (bottom static)",
+                            bench::Motion::BothMove => "Both screens (in-game)",
+                            bench::Motion::BottomMoves => "Bottom screen (top static)",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.bench_motion,
+                                bench::Motion::TopMoves,
+                                "Top screen (bottom static)",
+                            );
+                            ui.selectable_value(
+                                &mut self.bench_motion,
+                                bench::Motion::BothMove,
+                                "Both screens (in-game)",
+                            );
+                            ui.selectable_value(
+                                &mut self.bench_motion,
+                                bench::Motion::BottomMoves,
+                                "Bottom screen (top static)",
+                            );
+                        });
+                    ui.small("Scores the fps of the moving screen(s); the other stays a diagnostic.");
+                    if prev_motion != self.bench_motion && self.bench.is_none() {
+                        self.rescore_bench_table();
+                    }
+                }
                 match &self.bench {
                     Some(b) => {
                         ui.label(format!(
@@ -725,45 +781,6 @@ impl App {
                         }
                     }
                     None => {
-                        // Sweep depth: stepped slider with a time estimate.
-                        let depth_name = ["Quick", "Standard", "Thorough", "Exhaustive"]
-                            [self.bench_depth.min(3) as usize];
-                        let has_ds =
-                            self.caps().is_some_and(|a| a.has(feature::DOWNSCALE));
-                        let has_ch = self.caps().is_some_and(|a| a.has(feature::CHUNKS));
-                        let n = bench::plan_len(self.bench_depth, has_ds, has_ch);
-                        ui.add(
-                            egui::Slider::new(&mut self.bench_depth, 0..=3)
-                                .show_value(false)
-                                .text(format!(
-                                    "{depth_name}: {n} configs ≈ {:.0} s",
-                                    bench::Bench::estimate(n).as_secs_f32()
-                                )),
-                        );
-                        egui::ComboBox::from_label("Moving content")
-                            .selected_text(match self.bench_motion {
-                                bench::Motion::TopMoves => "Top screen (bottom static)",
-                                bench::Motion::BothMove => "Both screens (in-game)",
-                                bench::Motion::BottomMoves => "Bottom screen (top static)",
-                            })
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut self.bench_motion,
-                                    bench::Motion::TopMoves,
-                                    "Top screen (bottom static)",
-                                );
-                                ui.selectable_value(
-                                    &mut self.bench_motion,
-                                    bench::Motion::BothMove,
-                                    "Both screens (in-game)",
-                                );
-                                ui.selectable_value(
-                                    &mut self.bench_motion,
-                                    bench::Motion::BottomMoves,
-                                    "Bottom screen (top static)",
-                                );
-                            });
-                        ui.small("Scores the fps of the moving screen(s); the other stays a diagnostic.");
                         if let Some(s) = &self.bench_summary {
                             ui.separator();
                             ui.label(s.clone());
@@ -787,23 +804,6 @@ impl App {
                                     ui.strong("torn/s");
                                     ui.strong("score");
                                     ui.end_row();
-
-                                    // Baseline row: the settings from before
-                                    // the run — select to revert.
-                                    if let Some(prev) = self.bench_prev {
-                                        if ui
-                                            .radio(self.bench_selected.is_none(), "")
-                                            .clicked()
-                                        {
-                                            self.bench_selected = None;
-                                            apply = Some(prev);
-                                        }
-                                        ui.label("(previous settings)");
-                                        for _ in 0..10 {
-                                            ui.label("—");
-                                        }
-                                        ui.end_row();
-                                    }
 
                                     for (i, r) in self.bench_table.iter().enumerate() {
                                         if ui
@@ -901,6 +901,50 @@ impl App {
         self.show_bench = open;
     }
 
+    /// Re-rank the finished results table for the current goal/motion —
+    /// they only affect scoring, so no re-run is needed.
+    fn rescore_bench_table(&mut self) {
+        if self.bench_table.is_empty() {
+            return;
+        }
+        let selected_label = self
+            .bench_selected
+            .and_then(|i| self.bench_table.get(i))
+            .map(|r| r.label.clone());
+        let g = self.bench_goal;
+        let max_sharp = self
+            .bench_table
+            .iter()
+            .map(|r| r.sharp)
+            .fold(0.0f32, f32::max);
+        for r in &mut self.bench_table {
+            let quality = if max_sharp > 0.01 {
+                (0.6 * r.sharp / max_sharp + 0.4 * r.settings.quality as f32 / 100.0
+                    - 0.3 * (r.block - 1.0).clamp(0.0, 2.0))
+                .max(0.0)
+            } else {
+                0.5
+            };
+            let scored = match self.bench_motion {
+                bench::Motion::TopMoves => r.fps,
+                bench::Motion::BothMove => r.fps + r.bot,
+                bench::Motion::BottomMoves => r.bot,
+            };
+            r.score = (1.0 - g) * (scored / bench::FPS_TARGET).min(1.0) + g * quality;
+            r.winner = false;
+        }
+        self.bench_table.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        if let Some(first) = self.bench_table.first_mut() {
+            first.winner = true;
+        }
+        self.bench_selected =
+            selected_label.and_then(|l| self.bench_table.iter().position(|r| r.label == l));
+    }
+
     fn bench_tick(&mut self, ctx: &egui::Context) {
         let fps_top = self.meter.fps(false);
         let fps_bot = self.meter.fps(true);
@@ -931,7 +975,9 @@ impl App {
             self.bench_summary = b.summary.clone();
             self.bench_table = b.table.clone();
             self.bench = None;
-            self.bench_selected = None;
+            // Select the measured-baseline row: it matches the restored
+            // (currently applied) settings.
+            self.bench_selected = self.bench_table.iter().position(|r| r.is_baseline);
             self.last_top = None;
             self.status = self.bench_summary.clone().unwrap_or_default();
             self.send_stats_enabled(self.debug_stats);

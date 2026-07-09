@@ -19,7 +19,7 @@
 
 use std::time::{Duration, Instant};
 
-use flurry_proto::legacy::{feature, Announce};
+use flurry_proto::legacy::{feature, feature2, Announce};
 
 use crate::Settings;
 
@@ -27,7 +27,7 @@ const SETTLE: Duration = Duration::from_millis(1200);
 const MEASURE: Duration = Duration::from_millis(2500);
 const SAMPLE_EVERY: Duration = Duration::from_millis(200);
 /// fps at which the fps half of the score saturates.
-const FPS_TARGET: f32 = 24.0;
+pub const FPS_TARGET: f32 = 24.0;
 
 /// Parsed 3DS stats snapshot (from the 1 Hz stats packet).
 #[derive(Clone, Copy, Default)]
@@ -62,29 +62,111 @@ pub struct Options {
     pub motion: Motion,
 }
 
-fn depth_qualities(depth: u8) -> &'static [u8] {
-    match depth {
-        0 => &[70],
-        1 => &[45, 90],
-        _ => &[45, 70, 90],
-    }
-}
+/// Build the config list for a sweep depth. Encodes current measured
+/// knowledge (2026-07): quality is nearly CPU-free so high q leads; the
+/// dirty-rect pipeline made progressive competitive with decimation; the
+/// genuinely unsettled knobs are the grid geometry, so rows/cols variants
+/// appear from Standard depth up; chunks 4-vs-8 is settled (4 wins) and
+/// only sanity-checked at Exhaustive.
+pub fn plan_configs(depth: u8, current: Settings, caps: Option<Announce>) -> Vec<Settings> {
+    let has = |bit| caps.is_some_and(|a| a.has(bit));
+    let has2 = |bit| caps.is_some_and(|a| a.has2(bit));
 
-/// Number of configs a run at `depth` will test (for the UI time estimate).
-pub fn plan_len(depth: u8, has_downscale: bool, has_chunks: bool) -> usize {
-    let modes = if depth == 0 {
-        2
-    } else if has_downscale {
-        3
-    } else {
-        2
-    };
-    let n = modes * depth_qualities(depth).len();
-    if depth >= 3 && has_chunks {
-        n * 2
-    } else {
-        n
+    let mut base = current;
+    base.screen = 3; // both screens stream during measurement
+    if has(feature::STRIP_SKIP) {
+        base.strip_skip = true;
     }
+    if has(feature::STRIP_SLEEP) {
+        base.strip_sleep = 0;
+    }
+    if has(feature::CHUNKS) {
+        base.chunks = 4;
+    }
+    base.fps_cap = 0;
+    base.interlace = false;
+    base.downscale = false;
+
+    let mut plan: Vec<Settings> = Vec::new();
+    let mut add = |mut f: Box<dyn FnMut(&mut Settings)>| {
+        let mut cfg = base;
+        f(&mut cfg);
+        plan.push(cfg);
+    };
+
+    // Quick: the two configs that win most benchmarks.
+    add(Box::new(|c| c.quality = 90));
+    add(Box::new(|c| c.quality = 70));
+
+    if depth >= 1 {
+        if has(feature::OLD3DS_INTERLACE) || true {
+            add(Box::new(|c| {
+                c.quality = 90;
+                c.interlace = true;
+            }));
+        }
+        if has(feature::DOWNSCALE) {
+            add(Box::new(|c| {
+                c.quality = 90;
+                c.downscale = true;
+            }));
+        }
+        if has2(feature2::CELL_GRID) {
+            add(Box::new(|c| {
+                c.quality = 90;
+                c.grid_rows = 8;
+            }));
+        }
+    }
+    if depth >= 2 {
+        add(Box::new(|c| c.quality = 50));
+        add(Box::new(|c| {
+            c.quality = 70;
+            c.interlace = true;
+        }));
+        if has(feature::DOWNSCALE) {
+            add(Box::new(|c| {
+                c.quality = 70;
+                c.downscale = true;
+            }));
+        }
+        if has2(feature2::CELL_GRID) {
+            add(Box::new(|c| {
+                c.quality = 90;
+                c.grid_cols = 8;
+            }));
+        }
+    }
+    if depth >= 3 {
+        if has2(feature2::CELL_GRID) {
+            add(Box::new(|c| {
+                c.quality = 90;
+                c.grid_rows = 4;
+            }));
+            add(Box::new(|c| {
+                c.quality = 90;
+                c.grid_rows = 8;
+                c.grid_cols = 8;
+            }));
+        }
+        if has(feature::CHUNKS) {
+            add(Box::new(|c| {
+                c.quality = 90;
+                c.chunks = 8;
+            }));
+        }
+        add(Box::new(|c| {
+            c.quality = 50;
+            c.interlace = true;
+        }));
+        if has(feature::DOWNSCALE) {
+            add(Box::new(|c| {
+                c.quality = 50;
+                c.downscale = true;
+            }));
+        }
+    }
+    plan
 }
 
 #[derive(Clone, Copy)]
@@ -113,6 +195,8 @@ pub struct Bench {
 #[derive(Clone)]
 pub struct BenchResult {
     pub label: String,
+    /// This row is the user's pre-run settings, measured.
+    pub is_baseline: bool,
     /// The full settings of this config (screen restored to the user's
     /// selection) — applied live when the row is selected.
     pub settings: Settings,
@@ -151,6 +235,21 @@ fn mode_name(s: &Settings) -> &'static str {
     }
 }
 
+/// Human label including whichever variant knobs differ from the norm.
+fn cfg_label(s: &Settings) -> String {
+    let mut l = format!("{} q={}", mode_name(s), s.quality);
+    if s.grid_rows != 1 {
+        l.push_str(&format!(" rows={}", s.grid_rows));
+    }
+    if s.grid_cols != 16 {
+        l.push_str(&format!(" cols={}", s.grid_cols));
+    }
+    if s.chunks != 4 {
+        l.push_str(&format!(" ch={}", s.chunks));
+    }
+    l
+}
+
 fn trimmed_mean(mut v: Vec<f32>) -> f32 {
     if v.is_empty() {
         return 0.0;
@@ -165,60 +264,21 @@ fn trimmed_mean(mut v: Vec<f32>) -> f32 {
 impl Bench {
     /// Build the sweep from the current settings and announced features.
     pub fn start(opts: Options, current: Settings, caps: Option<Announce>) -> Bench {
-        let has = |bit| caps.is_some_and(|a| a.has(bit));
+        let mut plan: Vec<(Settings, f32)> = plan_configs(opts.depth, current, caps)
+            .into_iter()
+            .map(|cfg| {
+                let weight = mode_weight(&cfg) * (0.5 + 0.5 * cfg.quality as f32 / 100.0);
+                (cfg, weight)
+            })
+            .collect();
 
-        let mut base = current;
-        // Both screens: the static bottom screen exercises strip skip and
-        // the goal fps is the combined rate.
-        base.screen = 3;
-        if has(feature::STRIP_SKIP) {
-            base.strip_skip = true;
-            base.refresh_interval = 32;
-        }
-        if has(feature::STRIP_SLEEP) {
-            base.strip_sleep = 0;
-        }
-        if has(feature::CHUNKS) {
-            base.chunks = 4;
-        }
-        base.fps_cap = 0;
-
-        let qualities: &[u8] = depth_qualities(opts.depth);
-        let chunk_opts: &[u8] = if opts.depth >= 3 && has(feature::CHUNKS) {
-            &[4, 8]
-        } else {
-            &[0] // sentinel: keep base
-        };
-        // Quick depth: progressive plus the strongest available decimation.
-        let modes: &[(bool, bool)] = if opts.depth == 0 {
-            if has(feature::DOWNSCALE) {
-                &[(false, false), (false, true)]
-            } else {
-                &[(false, false), (true, false)]
-            }
-        } else {
-            &[(false, false), (true, false), (false, true)]
-        };
-
-        let mut plan = Vec::new();
-        for &chunks in chunk_opts {
-            for &(interlace, downscale) in modes {
-                if downscale && !has(feature::DOWNSCALE) {
-                    continue;
-                }
-                for &q in qualities {
-                    let mut cfg = base;
-                    if chunks != 0 {
-                        cfg.chunks = chunks;
-                    }
-                    cfg.interlace = interlace;
-                    cfg.downscale = downscale;
-                    cfg.quality = q;
-                    let weight = mode_weight(&cfg) * (0.5 + 0.5 * q as f32 / 100.0);
-                    plan.push((cfg, weight));
-                }
-            }
-        }
+        // Config #0: the user's CURRENT settings, measured as-is (only the
+        // both-screens view forced) — the baseline every other row is
+        // compared against.
+        let mut baseline = current;
+        baseline.screen = 3;
+        let bw = mode_weight(&baseline) * (0.5 + 0.5 * baseline.quality as f32 / 100.0);
+        plan.insert(0, (baseline, bw));
 
         Bench {
             opts,
@@ -240,7 +300,7 @@ impl Bench {
     /// Label for plan entry `i` (also used for screenshot filenames).
     pub fn label(&self, i: usize) -> String {
         let (cfg, _) = &self.plan[i.min(self.plan.len() - 1)];
-        format!("{}_q{}_c{}", mode_name(cfg), cfg.quality, cfg.chunks)
+        cfg_label(cfg).replace([' ', '='], "_")
     }
 
     pub fn total(&self) -> usize {
@@ -263,7 +323,7 @@ impl Bench {
 
     pub fn describe_current(&self) -> String {
         let (cfg, _) = &self.plan[self.idx.min(self.plan.len() - 1)];
-        format!("{} q={} chunks={}", mode_name(cfg), cfg.quality, cfg.chunks)
+        cfg_label(cfg)
     }
 
     /// Advance the state machine. `fps_top`/`fps_bot` = current per-screen
@@ -377,12 +437,12 @@ impl Bench {
                         let mut settings = *cfg;
                         settings.screen = self.restore.screen;
                         BenchResult {
-                            label: format!(
-                                "{} q={} c={}",
-                                mode_name(cfg),
-                                cfg.quality,
-                                cfg.chunks
-                            ),
+                            label: if i == 0 {
+                                format!("{} (current)", cfg_label(cfg))
+                            } else {
+                                cfg_label(cfg)
+                            },
+                            is_baseline: i == 0,
                             settings,
                             fps,
                             bot,
@@ -402,9 +462,8 @@ impl Bench {
                 });
                 let (win, _) = self.plan[best];
                 self.summary = Some(format!(
-                    "Top result: {} q={} — {:.1} fps (score {:.2}). Select a row to try it live.",
-                    mode_name(&win),
-                    win.quality,
+                    "Top result: {} — {:.1} fps (score {:.2}). Select a row to try it live.",
+                    cfg_label(&win),
                     scored(best),
                     best_score,
                 ));
