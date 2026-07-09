@@ -44,6 +44,8 @@ pub enum Codec {
     Jpeg = 1,
     /// Raw RGB565, both axes halved; client paints 2×2 per pixel.
     Raw565Half = 2,
+    /// Raw 24-bit BGR8 (3 bytes/px), framebuffer order — 24/32bpp sources.
+    RawBgr8 = 3,
 }
 
 /// Region flags.
@@ -124,6 +126,7 @@ pub fn parse_sframe_payload(payload: &[u8]) -> Result<SFramePayload<'_>> {
             0 => Codec::Raw565,
             1 => Codec::Jpeg,
             2 => Codec::Raw565Half,
+            3 => Codec::RawBgr8,
             v => return Err(Error::BadValue { field: "codec", value: v }),
         };
         off += REGION_HEADER_LEN;

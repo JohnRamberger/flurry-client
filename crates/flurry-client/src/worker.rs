@@ -269,25 +269,33 @@ impl ScreenBuf {
         };
 
         match r.codec {
-            v2::Codec::Raw565 | v2::Codec::Raw565Half => {
+            v2::Codec::Raw565 | v2::Codec::Raw565Half | v2::Codec::RawBgr8 => {
+                let bpc = if matches!(r.codec, v2::Codec::RawBgr8) { 3 } else { 2 };
                 let cols = rw / scale;
                 let colpx = (rh / scale) / if interlaced { 2 } else { 1 };
-                if r.data.len() < cols * colpx * 2 {
+                if r.data.len() < cols * colpx * bpc {
                     return Err("raw region data short".into());
                 }
                 for i in 0..cols {
                     for j in 0..colpx {
-                        let o = (i * colpx + j) * 2;
-                        let v = u16::from_le_bytes([r.data[o], r.data[o + 1]]);
-                        // GSP RGB565 packs RED in the high bits (confirmed
-                        // by screenshot forensics: ice-blue 120,200,255
-                        // rendered as its channel-mirror 248,200,120 orange
-                        // under the previous B-high assumption). The JPEG
-                        // path's BGR swap is a separate pipeline quirk.
-                        let rr = ((v >> 11) & 0x1F) as u8;
-                        let g = ((v >> 5) & 0x3F) as u8;
-                        let b = (v & 0x1F) as u8;
-                        put(i, j, egui::Color32::from_rgb(rr << 3, g << 2, b << 3));
+                        let o = (i * colpx + j) * bpc;
+                        let px = if bpc == 2 {
+                            let v = u16::from_le_bytes([r.data[o], r.data[o + 1]]);
+                            // GSP RGB565 packs RED in the high bits
+                            // (screenshot forensics; pending swatch
+                            // calibration for final confirmation).
+                            egui::Color32::from_rgb(
+                                (((v >> 11) & 0x1F) as u8) << 3,
+                                (((v >> 5) & 0x3F) as u8) << 2,
+                                ((v & 0x1F) as u8) << 3,
+                            )
+                        } else {
+                            // 24bpp framebuffers are the BGR8 family:
+                            // bytes [B][G][R] (matches the JPEG path's
+                            // historically-correct Home Menu swap).
+                            egui::Color32::from_rgb(r.data[o + 2], r.data[o + 1], r.data[o])
+                        };
+                        put(i, j, px);
                     }
                 }
             }
