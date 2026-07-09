@@ -365,38 +365,55 @@ impl App {
             return;
         }
         let s = &self.settings;
+        // IMPORTANT: `sent` is updated per-field, only for knobs actually
+        // transmitted. A blanket `*sent = settings` here once poisoned the
+        // diff when Capabilities arrived a frame after Connected: extension
+        // knobs were marked sent without ever hitting the wire (visible as
+        // skip/s=0 benchmarks on some runs but not others — a race).
         if sent.quality != s.quality {
             let _ = worker.cmds.send(Cmd::SetQuality(s.quality));
+            sent.quality = s.quality;
         }
         if sent.screen != s.screen {
             let _ = worker.cmds.send(Cmd::SetScreen(s.screen_set()));
+            sent.screen = s.screen;
         }
         if sent.interlace != s.interlace {
             let _ = worker.cmds.send(Cmd::SetInterlace(s.interlace));
+            sent.interlace = s.interlace;
         }
         if let Some(a) = caps {
             if a.has(feature::STRIP_SKIP) {
                 if sent.strip_skip != s.strip_skip {
                     let _ = worker.cmds.send(Cmd::SetStripSkip(s.strip_skip));
+                    sent.strip_skip = s.strip_skip;
                 }
                 if sent.refresh_interval != s.refresh_interval {
                     let _ = worker.cmds.send(Cmd::SetRefreshInterval(s.refresh_interval));
+                    sent.refresh_interval = s.refresh_interval;
                 }
             }
             if a.has(feature::FPS_CAP) && sent.fps_cap != s.fps_cap {
                 let _ = worker.cmds.send(Cmd::SetFpsCap(s.fps_cap));
+                sent.fps_cap = s.fps_cap;
             }
             if a.has(feature::CHUNKS) && sent.chunks != s.chunks {
                 let _ = worker.cmds.send(Cmd::SetChunks(s.chunks));
+                sent.chunks = s.chunks;
             }
             if a.has(feature::STRIP_SLEEP) && sent.strip_sleep != s.strip_sleep {
                 let _ = worker.cmds.send(Cmd::SetStripSleep(s.strip_sleep));
+                sent.strip_sleep = s.strip_sleep;
             }
             if a.has(feature::DOWNSCALE) && sent.downscale != s.downscale {
                 let _ = worker.cmds.send(Cmd::SetDownscale(s.downscale));
+                sent.downscale = s.downscale;
             }
         }
-        *sent = self.settings;
+        // Master-slider bookkeeping fields aren't wire state; mirror them so
+        // the cheap equality early-out above keeps working.
+        sent.master = s.master;
+        sent.custom = s.custom;
     }
 
     fn caps(&self) -> Option<Announce> {
