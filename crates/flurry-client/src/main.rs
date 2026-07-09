@@ -264,7 +264,10 @@ impl App {
                 }
                 Event::Capabilities(a) => {
                     *caps = Some(a);
-                    self.status = format!("Connected (extended sysmodule rev {})", a.revision);
+                    self.status = format!(
+                        "Connected (extended rev {}, features {:#08b})",
+                        a.revision, a.features
+                    );
                 }
                 Event::Screen { bottom, image, bytes, chunk } => {
                     self.meter.push(bytes, bottom, chunk);
