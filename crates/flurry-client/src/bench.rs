@@ -59,6 +59,7 @@ pub struct Bench {
     phase: Phase,
     samples: Vec<f32>,
     qual_samples: Vec<(f32, f32)>,
+    stats_samples: Vec<StatsSnap>,
     last_sample: Instant,
     restore: Settings,
     pub summary: Option<String>,
@@ -170,6 +171,7 @@ impl Bench {
             phase: Phase::Settle(Instant::now() + SETTLE),
             samples: Vec::new(),
             qual_samples: Vec::new(),
+            stats_samples: Vec::new(),
             last_sample: Instant::now(),
             restore: current,
             summary: None,
@@ -216,6 +218,7 @@ impl Bench {
                 if Instant::now() >= until {
                     self.samples.clear();
                     self.qual_samples.clear();
+                    self.stats_samples.clear();
                     self.last_sample = Instant::now();
                     self.phase = Phase::Measure(Instant::now() + MEASURE);
                 }
@@ -225,6 +228,7 @@ impl Bench {
                 if self.last_sample.elapsed() >= SAMPLE_EVERY {
                     self.samples.push(fps);
                     self.qual_samples.push(qual);
+                    self.stats_samples.push(stats);
                     self.last_sample = Instant::now();
                 }
                 if Instant::now() < until {
@@ -235,7 +239,18 @@ impl Bench {
                 let n = qs.len().max(1) as f32;
                 let sharp = qs.iter().map(|(s, _)| s).sum::<f32>() / n;
                 let block = qs.iter().map(|(_, b)| b).sum::<f32>() / n;
-                self.results.push((fps_avg, stats, sharp, block));
+                // Stats arrive at 1 Hz; sampling repeats values between
+                // packets, which weights the mean toward what was current —
+                // good enough for a window average.
+                let ss = std::mem::take(&mut self.stats_samples);
+                let sn = ss.len().max(1) as f32;
+                let stats_avg = StatsSnap {
+                    enc: ss.iter().map(|s| s.enc).sum::<f32>() / sn,
+                    send: ss.iter().map(|s| s.send).sum::<f32>() / sn,
+                    sent: ss.iter().map(|s| s.sent).sum::<f32>() / sn,
+                    skip: ss.iter().map(|s| s.skip).sum::<f32>() / sn,
+                };
+                self.results.push((fps_avg, stats_avg, sharp, block));
                 self.idx += 1;
                 if self.idx < self.plan.len() {
                     self.phase = Phase::Settle(Instant::now() + SETTLE);
