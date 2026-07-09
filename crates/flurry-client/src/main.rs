@@ -7,6 +7,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod bench;
 mod profiles;
 mod worker;
 
@@ -14,13 +15,14 @@ use std::collections::VecDeque;
 use std::time::Instant;
 
 use flurry_proto::legacy::{feature, Announce, ScreenSet};
+use profiles::{Device, Profile, DEVICE_TYPES};
 use serde::{Deserialize, Serialize};
 use worker::{Cmd, Event, Worker};
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([960.0, 640.0])
+            .with_inner_size([1000.0, 680.0])
             .with_title("Flurry"),
         ..Default::default()
     };
@@ -170,50 +172,78 @@ impl Meter {
 }
 
 struct App {
-    address: String,
+    store: profiles::Store,
+    /// Working copy of the selected device.
+    device: Device,
     settings: Settings,
     conn: Conn,
     status: String,
     stats: String,
+    log: VecDeque<String>,
     top_tex: Option<egui::TextureHandle>,
     bottom_tex: Option<egui::TextureHandle>,
-    store: profiles::Store,
-    /// Profile name field (doubles as "save as" input).
-    profile_name: String,
     meter: Meter,
-    /// Recent 3DS-side notices (capture telemetry, errors) — newest last.
-    log: VecDeque<String>,
+    /// Device editor modal draft (None = closed).
+    device_editor: Option<Device>,
+    /// Inline "save profile as" name field.
+    new_profile_name: String,
+    show_bench: bool,
+    bench_goal: f32,
+    bench: Option<bench::Bench>,
+    bench_summary: Option<String>,
 }
 
 impl App {
     fn new() -> App {
         let store = profiles::Store::load();
-        let mut app = App {
-            address: String::new(),
-            settings: Settings::default(),
+        let device = store
+            .last_device
+            .as_deref()
+            .and_then(|n| store.get_device(n))
+            .cloned()
+            .unwrap_or_default();
+        let settings = device
+            .profile
+            .as_deref()
+            .and_then(|n| store.get_profile(n))
+            .map(|p| p.settings)
+            .unwrap_or_default();
+        App {
+            store,
+            device,
+            settings,
             conn: Conn::Idle,
             status: "Not connected".into(),
             stats: String::new(),
+            log: VecDeque::new(),
             top_tex: None,
             bottom_tex: None,
-            profile_name: String::new(),
-            store,
             meter: Meter::default(),
-            log: VecDeque::new(),
-        };
-        if let Some(name) = app.store.last.clone() {
-            app.load_profile(&name);
+            device_editor: None,
+            new_profile_name: String::new(),
+            show_bench: false,
+            bench_goal: 0.5,
+            bench: None,
+            bench_summary: None,
         }
-        app
     }
 
-    fn load_profile(&mut self, name: &str) {
-        if let Some(p) = self.store.get(name) {
-            self.address = p.address.clone();
-            self.settings = p.settings;
-            self.profile_name = p.name.clone();
-            self.store.last = Some(p.name.clone());
+    fn select_device(&mut self, name: &str) {
+        if let Some(d) = self.store.get_device(name).cloned() {
+            if let Some(p) = d.profile.as_deref().and_then(|n| self.store.get_profile(n)) {
+                self.settings = p.settings;
+            }
+            self.device = d;
+            self.store.last_device = Some(name.to_string());
             self.store.save();
+        }
+    }
+
+    fn select_profile(&mut self, name: &str) {
+        if let Some(p) = self.store.get_profile(name) {
+            self.settings = p.settings;
+            self.device.profile = Some(name.to_string());
+            self.store.upsert_device(self.device.clone());
         }
     }
 
@@ -260,6 +290,7 @@ impl App {
         if let Some(reason) = disconnect_reason {
             self.conn = Conn::Idle;
             self.status = reason;
+            self.bench = None; // benchmark cannot continue without a stream
         }
     }
 
@@ -307,77 +338,290 @@ impl App {
         *sent = self.settings;
     }
 
-    fn controls_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Profile");
-        let selected = self.store.last.clone().unwrap_or_default();
-        let mut load: Option<String> = None;
-        egui::ComboBox::from_id_salt("profile")
-            .width(160.0)
-            .selected_text(if selected.is_empty() { "—" } else { &selected })
-            .show_ui(ui, |ui| {
-                for p in &self.store.profiles {
-                    if ui.selectable_label(p.name == selected, &p.name).clicked() {
-                        load = Some(p.name.clone());
+    fn caps(&self) -> Option<Announce> {
+        match &self.conn {
+            Conn::Active { caps, .. } => *caps,
+            Conn::Idle => None,
+        }
+    }
+
+    fn connect(&mut self, ctx: &egui::Context) {
+        if self.device.address.trim().is_empty() {
+            self.status = "Set the device IP first (Device → Edit)".into();
+            return;
+        }
+        let worker = worker::spawn(
+            format!("{}:{}", self.device.address.trim(), self.device.port),
+            ctx.clone(),
+            self.settings.quality,
+            self.settings.screen_set(),
+            self.settings.interlace,
+        );
+        self.conn = Conn::Active {
+            worker,
+            sent: self.settings,
+            connected: false,
+            caps: None,
+        };
+        self.status = "Connecting…".into();
+    }
+
+    // ------------------------------------------------------------------ UI
+
+    fn toolbar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            // Device menu
+            let dev_label = format!("🎮 {}", self.device.name);
+            ui.menu_button(dev_label, |ui| {
+                let names: Vec<String> =
+                    self.store.devices.iter().map(|d| d.name.clone()).collect();
+                for name in names {
+                    if ui
+                        .selectable_label(self.device.name == name, &name)
+                        .clicked()
+                    {
+                        self.select_device(&name);
+                        ui.close();
+                    }
+                }
+                if !self.store.devices.is_empty() {
+                    ui.separator();
+                }
+                if ui.button("New device…").clicked() {
+                    self.device_editor = Some(Device::default());
+                    ui.close();
+                }
+                if ui.button("Edit current…").clicked() {
+                    self.device_editor = Some(self.device.clone());
+                    ui.close();
+                }
+                if ui.button("Delete current").clicked() {
+                    let name = self.device.name.clone();
+                    self.store.delete_device(&name);
+                    self.device = self.store.devices.first().cloned().unwrap_or_default();
+                    ui.close();
+                }
+            });
+
+            match &self.conn {
+                Conn::Idle => {
+                    if ui.button("Connect").clicked() {
+                        self.connect(&ui.ctx().clone());
+                    }
+                }
+                Conn::Active { worker, .. } => {
+                    if ui.button("Disconnect").clicked() {
+                        let _ = worker.cmds.send(Cmd::Disconnect);
+                    }
+                }
+            }
+
+            ui.separator();
+
+            // Profile menu
+            let prof_label = format!(
+                "📼 {}",
+                self.device.profile.as_deref().unwrap_or("(no profile)")
+            );
+            ui.menu_button(prof_label, |ui| {
+                let names: Vec<String> =
+                    self.store.profiles.iter().map(|p| p.name.clone()).collect();
+                for name in names {
+                    if ui
+                        .selectable_label(self.device.profile.as_deref() == Some(&name), &name)
+                        .clicked()
+                    {
+                        self.select_profile(&name);
+                        ui.close();
+                    }
+                }
+                if !self.store.profiles.is_empty() {
+                    ui.separator();
+                }
+                if let Some(current) = self.device.profile.clone() {
+                    if ui.button(format!("Save to '{current}'")).clicked() {
+                        self.store.upsert_profile(Profile {
+                            name: current.clone(),
+                            settings: self.settings,
+                        });
+                        ui.close();
+                    }
+                    if ui.button(format!("Delete '{current}'")).clicked() {
+                        self.store.delete_profile(&current);
+                        self.device.profile = None;
+                        ui.close();
+                    }
+                    ui.separator();
+                }
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.new_profile_name)
+                            .hint_text("new profile name")
+                            .desired_width(140.0),
+                    );
+                    let name = self.new_profile_name.trim().to_string();
+                    if ui.add_enabled(!name.is_empty(), egui::Button::new("Save as")).clicked() {
+                        self.store.upsert_profile(Profile {
+                            name: name.clone(),
+                            settings: self.settings,
+                        });
+                        self.device.profile = Some(name);
+                        self.store.upsert_device(self.device.clone());
+                        self.new_profile_name.clear();
+                        ui.close();
+                    }
+                });
+            });
+
+            ui.separator();
+
+            let bench_on = self.bench.is_some();
+            if ui
+                .add_enabled(
+                    matches!(self.conn, Conn::Active { connected: true, .. }) || bench_on,
+                    egui::Button::new(if bench_on { "⚡ Benchmarking…" } else { "⚡ Benchmark" }),
+                )
+                .clicked()
+            {
+                self.show_bench = true;
+            }
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(&self.status);
+            });
+        });
+    }
+
+    fn device_editor_window(&mut self, ctx: &egui::Context) {
+        let Some(mut draft) = self.device_editor.take() else { return };
+        let mut open = true;
+        let mut done = false;
+        egui::Window::new("Device")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Name:");
+                    ui.text_edit_singleline(&mut draft.name);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("IP:");
+                    ui.text_edit_singleline(&mut draft.address);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Port:");
+                    ui.add(egui::DragValue::new(&mut draft.port).range(1..=65535));
+                });
+                egui::ComboBox::from_label("Type")
+                    .selected_text(draft.device_type.label())
+                    .show_ui(ui, |ui| {
+                        for t in DEVICE_TYPES {
+                            ui.selectable_value(&mut draft.device_type, t, t.label());
+                        }
+                    });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            !draft.name.trim().is_empty(),
+                            egui::Button::new("Save"),
+                        )
+                        .clicked()
+                    {
+                        draft.name = draft.name.trim().to_string();
+                        self.store.upsert_device(draft.clone());
+                        self.device = draft.clone();
+                        done = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        done = true;
+                    }
+                });
+            });
+        if open && !done {
+            self.device_editor = Some(draft);
+        }
+    }
+
+    fn bench_window(&mut self, ctx: &egui::Context) {
+        if !self.show_bench {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("Benchmark")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label("Sweeps decimation modes and JPEG quality on the live\nconnection and picks the best fit for your goal.");
+                ui.small("Tip: open the Flurry app on the 3DS — its moving test\npattern gives worst-case (honest) fps numbers.");
+                ui.separator();
+                ui.add(
+                    egui::Slider::new(&mut self.bench_goal, 0.0..=1.0)
+                        .show_value(false)
+                        .text("FPS ↔ Quality"),
+                );
+                match &self.bench {
+                    Some(b) => {
+                        ui.label(format!(
+                            "Running {}/{}: {}",
+                            b.step() + 1,
+                            b.total(),
+                            b.describe_current()
+                        ));
+                        let (fps_top, fps_bot) = (self.meter.fps(false), self.meter.fps(true));
+                        ui.label(format!("live: {:.1} fps", fps_top + fps_bot));
+                        if ui.button("Cancel").clicked() {
+                            let restore = self.bench.as_ref().unwrap().cancel();
+                            self.settings = restore;
+                            self.bench = None;
+                        }
+                    }
+                    None => {
+                        if let Some(s) = &self.bench_summary {
+                            ui.label(s.clone());
+                        }
+                        let connected =
+                            matches!(self.conn, Conn::Active { connected: true, .. });
+                        if ui
+                            .add_enabled(connected, egui::Button::new("Run benchmark"))
+                            .clicked()
+                        {
+                            self.bench_summary = None;
+                            self.bench = Some(bench::Bench::start(
+                                self.bench_goal,
+                                self.settings,
+                                self.caps(),
+                            ));
+                        }
+                        if !connected {
+                            ui.small("Connect first.");
+                        }
                     }
                 }
             });
-        if let Some(name) = load {
-            self.load_profile(&name);
-        }
-        ui.horizontal(|ui| {
-            ui.label("Name:");
-            ui.text_edit_singleline(&mut self.profile_name);
-        });
-        ui.horizontal(|ui| {
-            let name = self.profile_name.trim().to_string();
-            if ui.add_enabled(!name.is_empty(), egui::Button::new("Save")).clicked() {
-                self.store.upsert(profiles::Profile {
-                    name,
-                    address: self.address.trim().to_string(),
-                    settings: self.settings,
-                });
-            } else if ui
-                .add_enabled(self.store.get(&name).is_some(), egui::Button::new("Delete"))
-                .clicked()
-            {
-                self.store.delete(&name);
-            }
-        });
+        self.show_bench = open;
+    }
 
-        ui.separator();
-        ui.heading("Connection");
-        ui.horizontal(|ui| {
-            ui.label("3DS IP:");
-            ui.text_edit_singleline(&mut self.address);
-        });
-        match &self.conn {
-            Conn::Idle => {
-                if ui.button("Connect").clicked() && !self.address.trim().is_empty() {
-                    let worker = worker::spawn(
-                        self.address.trim().to_string(),
-                        ui.ctx().clone(),
-                        self.settings.quality,
-                        self.settings.screen_set(),
-                        self.settings.interlace,
-                    );
-                    self.conn = Conn::Active {
-                        worker,
-                        sent: self.settings,
-                        connected: false,
-                        caps: None,
-                    };
-                    self.status = "Connecting…".into();
-                }
-            }
-            Conn::Active { worker, .. } => {
-                if ui.button("Disconnect").clicked() {
-                    let _ = worker.cmds.send(Cmd::Disconnect);
-                }
-            }
+    fn bench_tick(&mut self, ctx: &egui::Context) {
+        let Some(b) = &mut self.bench else { return };
+        // Keep the stream on the config under test.
+        self.settings = b.current_config();
+        let fps = {
+            let f = self.meter.fps(false) + self.meter.fps(true);
+            f
+        };
+        if let Some(winner) = b.tick(fps) {
+            self.settings = winner;
+            self.bench_summary = b.summary.clone();
+            self.bench = None;
+            self.status = self.bench_summary.clone().unwrap_or_default();
         }
-        ui.label(&self.status);
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+    }
 
-        ui.separator();
+    fn controls_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("Stream");
         let master = ui.add(
             egui::Slider::new(&mut self.settings.master, 0.0..=1.0)
@@ -402,10 +646,7 @@ impl App {
             });
         self.settings.screen = screen;
 
-        let caps = match &self.conn {
-            Conn::Active { caps, .. } => *caps,
-            Conn::Idle => None,
-        };
+        let caps = self.caps();
         egui::CollapsingHeader::new("Advanced").show(ui, |ui| {
             let s = &mut self.settings;
             let before = *s;
@@ -419,8 +660,9 @@ impl App {
                     " (needs extended sysmodule)"
                 }
             };
+            let idle = matches!(self.conn, Conn::Idle);
             let skip_ok = caps.is_some_and(|a| a.has(feature::STRIP_SKIP));
-            ui.add_enabled_ui(skip_ok || matches!(self.conn, Conn::Idle), |ui| {
+            ui.add_enabled_ui(skip_ok || idle, |ui| {
                 ui.checkbox(&mut s.strip_skip, format!("Skip unchanged strips{}", ext(skip_ok)));
                 ui.add(
                     egui::Slider::new(&mut s.refresh_interval, 0..=255)
@@ -428,14 +670,14 @@ impl App {
                 );
             });
             let cap_ok = caps.is_some_and(|a| a.has(feature::FPS_CAP));
-            ui.add_enabled_ui(cap_ok || matches!(self.conn, Conn::Idle), |ui| {
+            ui.add_enabled_ui(cap_ok || idle, |ui| {
                 ui.add(
                     egui::Slider::new(&mut s.fps_cap, 0..=60)
                         .text(format!("FPS cap (0 = off){}", ext(cap_ok))),
                 );
             });
             let chunks_ok = caps.is_some_and(|a| a.has(feature::CHUNKS));
-            ui.add_enabled_ui(chunks_ok || matches!(self.conn, Conn::Idle), |ui| {
+            ui.add_enabled_ui(chunks_ok || idle, |ui| {
                 egui::ComboBox::from_label(format!("Chunks (Old 3DS){}", ext(chunks_ok)))
                     .selected_text(format!("{}", s.chunks))
                     .show_ui(ui, |ui| {
@@ -445,14 +687,14 @@ impl App {
                     });
             });
             let sleep_ok = caps.is_some_and(|a| a.has(feature::STRIP_SLEEP));
-            ui.add_enabled_ui(sleep_ok || matches!(self.conn, Conn::Idle), |ui| {
+            ui.add_enabled_ui(sleep_ok || idle, |ui| {
                 ui.add(
                     egui::Slider::new(&mut s.strip_sleep, 0..=20)
                         .text(format!("Strip sleep ms{}", ext(sleep_ok))),
                 );
             });
             let ds_ok = caps.is_some_and(|a| a.has(feature::DOWNSCALE));
-            ui.add_enabled_ui(ds_ok || matches!(self.conn, Conn::Idle), |ui| {
+            ui.add_enabled_ui(ds_ok || idle, |ui| {
                 ui.checkbox(
                     &mut s.downscale,
                     format!("Quarter-res (~4x faster){}", ext(ds_ok)),
@@ -476,29 +718,38 @@ impl App {
                 });
         }
         if !self.log.is_empty() {
-            egui::CollapsingHeader::new("3DS log")
-                .default_open(true)
-                .show(ui, |ui| {
-                    for line in &self.log {
-                        ui.small(line);
-                    }
-                });
+            egui::CollapsingHeader::new("3DS log").show(ui, |ui| {
+                for line in &self.log {
+                    ui.small(line);
+                }
+            });
         }
     }
 }
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.drain_events(&ui.ctx().clone());
+        let ctx = ui.ctx().clone();
+        self.drain_events(&ctx);
+        self.bench_tick(&ctx);
+
+        egui::Panel::top(egui::Id::new("toolbar")).show(ui, |ui| {
+            self.toolbar(ui);
+        });
 
         egui::Panel::left(egui::Id::new("controls"))
             .resizable(false)
-            .default_size(250.0)
+            .default_size(260.0)
             .show(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| self.controls_panel(ui));
+                let busy = self.bench.is_some();
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.add_enabled_ui(!busy, |ui| self.controls_panel(ui));
+                });
             });
 
         self.push_settings();
+        self.device_editor_window(&ctx);
+        self.bench_window(&ctx);
 
         egui::CentralPanel::default().show(ui, |ui| {
             let show_top = self.settings.screen != 2;
