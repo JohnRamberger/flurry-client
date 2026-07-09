@@ -233,7 +233,13 @@ impl ScreenBuf {
         let field_b = (r.flags & v2::region_flags::FIELD_B != 0) as usize;
         // Vertical stride between successive samples in a column, and the
         // block each sample paints (fills interlace/downscale gaps).
-        let scale = if matches!(r.codec, v2::Codec::Raw565Half) { 2 } else { 1 };
+        let scale = if matches!(r.codec, v2::Codec::Raw565Half)
+            || r.flags & v2::region_flags::DOWNSCALED != 0
+        {
+            2
+        } else {
+            1
+        };
         let ystep = scale * if interlaced { 2 } else { 1 };
 
         let mut put = |col: usize, sample: usize, px: egui::Color32| {

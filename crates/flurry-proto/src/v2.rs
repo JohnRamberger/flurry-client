@@ -52,6 +52,9 @@ pub mod region_flags {
     pub const FIELD_B: u8 = 1 << 0;
     /// Region is an interlaced field (half horizontal resolution).
     pub const INTERLACED: u8 = 1 << 1;
+    /// Region content is 2x-downscaled on both axes (client paints 2x2).
+    /// Implied for [`Codec::Raw565Half`]; required for downscaled JPEG.
+    pub const DOWNSCALED: u8 = 1 << 2;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
