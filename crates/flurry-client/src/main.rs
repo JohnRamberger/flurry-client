@@ -198,7 +198,6 @@ enum SettingsTab {
     Picture,
     Performance,
     Detection,
-    Debug,
 }
 
 /// Parse the sysmodule's key=value stats text.
@@ -294,7 +293,7 @@ impl App {
     }
 
     fn drain_events(&mut self, ctx: &egui::Context) {
-        let Conn::Active { worker, connected, caps, .. } = &mut self.conn else {
+        let Conn::Active { worker, connected, caps, sent } = &mut self.conn else {
             return;
         };
         let mut disconnect_reason = None;
@@ -314,6 +313,18 @@ impl App {
                         "Connected (extended rev {}, features {:#08b})",
                         a.revision, a.features
                     );
+                    // Re-baseline the diff tracker to the device's defaults:
+                    // the next push transmits the full profile regardless of
+                    // event ordering (profiles otherwise silently failed to
+                    // apply on some connects).
+                    sent.strip_skip = false;
+                    sent.refresh_interval = 64;
+                    sent.fps_cap = 0;
+                    sent.chunks = 8;
+                    sent.strip_sleep = 5;
+                    sent.downscale = false;
+                    sent.grid_cols = 16;
+                    sent.grid_rows = 1;
                     // Stats are opt-in on toggle-capable sysmodules; enable
                     // them if the user wants debug info or a bench is live.
                     if a.has(feature::STATS_TOGGLE)
@@ -925,7 +936,6 @@ impl App {
                         (SettingsTab::Picture, "Picture"),
                         (SettingsTab::Performance, "Performance"),
                         (SettingsTab::Detection, "Change detection"),
-                        (SettingsTab::Debug, "Debug"),
                     ] {
                         ui.selectable_value(&mut self.settings_tab, tab, label);
                     }
@@ -988,31 +998,8 @@ impl App {
                                 });
                         });
                     }
-                    SettingsTab::Debug => {}
                 }
                 let _ = before; // settings apply live via push_settings
-
-                if self.settings_tab == SettingsTab::Debug {
-                    if ui
-                        .checkbox(&mut self.debug_stats, "3DS perf stats")
-                        .changed()
-                    {
-                        self.send_stats_enabled(self.debug_stats);
-                        if !self.debug_stats {
-                            self.stats.clear();
-                        }
-                    }
-                    ui.small("Streams a 1 Hz report from the console: encode/send time, skipped and torn strips. Shown in the left panel.");
-                    ui.add_space(8.0);
-                    if ui
-                        .checkbox(&mut self.show_updates, "Update overlay")
-                        .changed()
-                        && !self.show_updates
-                    {
-                        self.update_rects.clear();
-                    }
-                    ui.small("Draws fading red boxes over screen regions as they update — makes skip behavior and dirty-rect sizes visible.");
-                }
 
                 ui.separator();
                 if let Some(name) = self.device.profile.clone() {
@@ -1054,6 +1041,24 @@ impl App {
         ui.separator();
         ui.strong(format!("Top {fps_top:.1} fps   Bottom {fps_bot:.1} fps"));
         ui.label(format!("{ups} strips/s   {mbps:.2} Mbit/s"));
+
+        ui.separator();
+        if ui
+            .checkbox(&mut self.debug_stats, "3DS perf stats")
+            .changed()
+        {
+            self.send_stats_enabled(self.debug_stats);
+            if !self.debug_stats {
+                self.stats.clear();
+            }
+        }
+        if ui
+            .checkbox(&mut self.show_updates, "Update overlay")
+            .changed()
+            && !self.show_updates
+        {
+            self.update_rects.clear();
+        }
         // Older sysmodules stream stats unconditionally; only show them
         // when wanted (the packets are still parsed for benchmarks).
         if self.debug_stats && !self.stats.is_empty() {
