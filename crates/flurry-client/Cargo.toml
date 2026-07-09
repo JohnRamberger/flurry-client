@@ -11,6 +11,7 @@ dirs = "6.0.0"
 eframe = "0.35.0"
 egui = "0.35.0"
 flurry-proto = { path = "../flurry-proto" }
+png = "0.18.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 zune-jpeg = "0.5.15"

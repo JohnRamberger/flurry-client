@@ -1098,6 +1098,7 @@ dependencies = [
  "eframe",
  "egui",
  "flurry-proto",
+ "png",
  "serde",
  "serde_json",
  "zune-jpeg",

@@ -9,6 +9,7 @@
 
 mod bench;
 mod profiles;
+mod quality;
 mod worker;
 
 use std::collections::VecDeque;
@@ -198,6 +199,11 @@ struct App {
     debug_stats: bool,
     /// Latest parsed 3DS stats (for the benchmark).
     stats_snap: bench::StatsSnap,
+    /// CPU copy of the latest decoded top-screen frame (kept only while a
+    /// benchmark runs; feeds the quality metrics and screenshots).
+    last_top: Option<egui::ColorImage>,
+    /// Screenshot folder of the current/last benchmark run.
+    bench_dir: Option<std::path::PathBuf>,
 }
 
 /// Parse the sysmodule's key=value stats text.
@@ -254,6 +260,8 @@ impl App {
             bench_table: Vec::new(),
             debug_stats: false,
             stats_snap: bench::StatsSnap::default(),
+            last_top: None,
+            bench_dir: None,
         }
     }
 
@@ -313,6 +321,9 @@ impl App {
                 }
                 Event::Screen { bottom, image, bytes, chunk } => {
                     self.meter.push(bytes, bottom, chunk);
+                    if !bottom && self.bench.is_some() {
+                        self.last_top = Some(image.clone());
+                    }
                     let (slot, name) = if bottom {
                         (&mut self.bottom_tex, "bottom")
                     } else {
@@ -658,6 +669,7 @@ impl App {
                                 .show(ui, |ui| {
                                     ui.strong("Config");
                                     ui.strong("fps");
+                                    ui.strong("sharp");
                                     ui.strong("enc ms/s");
                                     ui.strong("send ms/s");
                                     ui.strong("skip/s");
@@ -671,6 +683,7 @@ impl App {
                                         };
                                         ui.label(label);
                                         ui.label(format!("{:.1}", r.fps));
+                                        ui.label(format!("{:.2}", r.sharp));
                                         ui.label(format!("{:.0}", r.stats.enc));
                                         ui.label(format!("{:.0}", r.stats.send));
                                         ui.label(format!("{:.0}", r.stats.skip));
@@ -678,6 +691,9 @@ impl App {
                                         ui.end_row();
                                     }
                                 });
+                            if let Some(dir) = &self.bench_dir {
+                                ui.small(format!("Screenshots: {}", dir.display()));
+                            }
                         }
                         let connected =
                             matches!(self.conn, Conn::Active { connected: true, .. });
@@ -687,6 +703,15 @@ impl App {
                         {
                             self.bench_summary = None;
                             self.send_stats_enabled(true);
+                            self.bench_dir = dirs::config_dir().map(|d| {
+                                d.join("flurry-client").join("bench").join(format!(
+                                    "{}",
+                                    std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.as_secs())
+                                        .unwrap_or(0)
+                                ))
+                            });
                             self.bench = Some(bench::Bench::start(
                                 bench::Options {
                                     goal: self.bench_goal,
@@ -709,14 +734,31 @@ impl App {
     fn bench_tick(&mut self, ctx: &egui::Context) {
         let fps = self.meter.fps(false) + self.meter.fps(true);
         let snap = self.stats_snap;
+        let qual = self
+            .last_top
+            .as_ref()
+            .map(quality::measure)
+            .unwrap_or((0.0, 1.0));
         let Some(b) = &mut self.bench else { return };
         // Keep the stream on the config under test.
         self.settings = b.current_config();
-        if let Some(winner) = b.tick(fps, snap) {
+        let prev_step = b.step();
+        let finished = b.tick(fps, qual, snap);
+        // Config finished (advanced or run done): screenshot it.
+        if b.step() != prev_step || finished.is_some() {
+            if let (Some(img), Some(dir)) = (&self.last_top, &self.bench_dir) {
+                let path = dir.join(format!("{}.png", b.label(prev_step)));
+                if let Err(e) = quality::save_png(img, &path) {
+                    self.log.push_back(format!("screenshot failed: {e}"));
+                }
+            }
+        }
+        if let Some(winner) = finished {
             self.settings = winner;
             self.bench_summary = b.summary.clone();
             self.bench_table = b.table.clone();
             self.bench = None;
+            self.last_top = None;
             self.status = self.bench_summary.clone().unwrap_or_default();
             self.send_stats_enabled(self.debug_stats);
         }

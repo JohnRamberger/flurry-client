@@ -53,11 +53,12 @@ enum Phase {
 
 pub struct Bench {
     opts: Options,
-    plan: Vec<(Settings, f32)>, // config + quality weight
-    results: Vec<(f32, StatsSnap)>,
+    plan: Vec<(Settings, f32)>, // config + fallback quality weight
+    results: Vec<(f32, StatsSnap, f32, f32)>, // fps, stats, sharpness, blockiness
     idx: usize,
     phase: Phase,
     samples: Vec<f32>,
+    qual_samples: Vec<(f32, f32)>,
     last_sample: Instant,
     restore: Settings,
     pub summary: Option<String>,
@@ -70,6 +71,8 @@ pub struct BenchResult {
     pub label: String,
     pub fps: f32,
     pub stats: StatsSnap,
+    /// Measured no-reference sharpness (relative across the run).
+    pub sharp: f32,
     pub score: f32,
     pub winner: bool,
 }
@@ -166,11 +169,18 @@ impl Bench {
             idx: 0,
             phase: Phase::Settle(Instant::now() + SETTLE),
             samples: Vec::new(),
+            qual_samples: Vec::new(),
             last_sample: Instant::now(),
             restore: current,
             summary: None,
             table: Vec::new(),
         }
+    }
+
+    /// Label for plan entry `i` (also used for screenshot filenames).
+    pub fn label(&self, i: usize) -> String {
+        let (cfg, _) = &self.plan[i.min(self.plan.len() - 1)];
+        format!("{}_q{}_c{}", mode_name(cfg), cfg.quality, cfg.chunks)
     }
 
     pub fn total(&self) -> usize {
@@ -197,13 +207,15 @@ impl Bench {
     }
 
     /// Advance the state machine. `fps` = current combined fps reading,
+    /// `qual` = (sharpness, blockiness) of the latest decoded top frame,
     /// `stats` = latest parsed 3DS stats. Returns the winning settings once
     /// finished.
-    pub fn tick(&mut self, fps: f32, stats: StatsSnap) -> Option<Settings> {
+    pub fn tick(&mut self, fps: f32, qual: (f32, f32), stats: StatsSnap) -> Option<Settings> {
         match self.phase {
             Phase::Settle(until) => {
                 if Instant::now() >= until {
                     self.samples.clear();
+                    self.qual_samples.clear();
                     self.last_sample = Instant::now();
                     self.phase = Phase::Measure(Instant::now() + MEASURE);
                 }
@@ -212,48 +224,68 @@ impl Bench {
             Phase::Measure(until) => {
                 if self.last_sample.elapsed() >= SAMPLE_EVERY {
                     self.samples.push(fps);
+                    self.qual_samples.push(qual);
                     self.last_sample = Instant::now();
                 }
                 if Instant::now() < until {
                     return None;
                 }
                 let fps_avg = trimmed_mean(std::mem::take(&mut self.samples));
-                self.results.push((fps_avg, stats));
+                let qs = std::mem::take(&mut self.qual_samples);
+                let n = qs.len().max(1) as f32;
+                let sharp = qs.iter().map(|(s, _)| s).sum::<f32>() / n;
+                let block = qs.iter().map(|(_, b)| b).sum::<f32>() / n;
+                self.results.push((fps_avg, stats, sharp, block));
                 self.idx += 1;
                 if self.idx < self.plan.len() {
                     self.phase = Phase::Settle(Instant::now() + SETTLE);
                     return None;
                 }
 
-                // Done: score everything.
+                // Done: score everything. Quality is the MEASURED relative
+                // sharpness (penalized by blockiness) when we got frames;
+                // the static per-mode weight is only a fallback.
                 let g = self.opts.goal;
+                let max_sharp = self
+                    .results
+                    .iter()
+                    .map(|(_, _, s, _)| *s)
+                    .fold(0.0f32, f32::max);
+                let quality_of = |i: usize| -> f32 {
+                    let (_, _, sharp, block) = self.results[i];
+                    if max_sharp > 0.01 {
+                        (sharp / max_sharp - 0.15 * (block - 1.0).clamp(0.0, 2.0)).max(0.0)
+                    } else {
+                        self.plan[i].1
+                    }
+                };
                 let mut best = 0usize;
                 let mut best_score = f32::MIN;
-                for (i, ((_, weight), (fps, _))) in
-                    self.plan.iter().zip(&self.results).enumerate()
-                {
-                    let score = (1.0 - g) * (fps / FPS_TARGET).min(1.0) + g * weight;
+                for (i, (fps, _, _, _)) in self.results.iter().enumerate() {
+                    let score = (1.0 - g) * (fps / FPS_TARGET).min(1.0) + g * quality_of(i);
                     if score > best_score {
                         best_score = score;
                         best = i;
                     }
                 }
-                self.table = self
-                    .plan
-                    .iter()
-                    .zip(&self.results)
-                    .enumerate()
-                    .map(|(i, ((cfg, weight), (fps, stats)))| BenchResult {
-                        label: format!(
-                            "{} q={} c={}",
-                            mode_name(cfg),
-                            cfg.quality,
-                            cfg.chunks
-                        ),
-                        fps: *fps,
-                        stats: *stats,
-                        score: (1.0 - g) * (fps / FPS_TARGET).min(1.0) + g * weight,
-                        winner: i == best,
+                self.table = (0..self.plan.len())
+                    .map(|i| {
+                        let (cfg, _) = &self.plan[i];
+                        let (fps, stats, sharp, _) = self.results[i];
+                        BenchResult {
+                            label: format!(
+                                "{} q={} c={}",
+                                mode_name(cfg),
+                                cfg.quality,
+                                cfg.chunks
+                            ),
+                            fps,
+                            stats,
+                            sharp,
+                            score: (1.0 - g) * (fps / FPS_TARGET).min(1.0)
+                                + g * quality_of(i),
+                            winner: i == best,
+                        }
                     })
                     .collect();
                 self.table.sort_by(|a, b| {
