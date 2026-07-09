@@ -67,8 +67,10 @@ impl Default for Settings {
             strip_skip: true,
             refresh_interval: 64,
             fps_cap: 0,
-            chunks: 8,
-            strip_sleep: 5,
+            // Measured on Old 3DS XL: 4 chunks + no inter-strip sleep gave
+            // +65% sent fps over the legacy 8/5ms (see flurry PERF notes).
+            chunks: 4,
+            strip_sleep: 0,
         };
         s.apply_master();
         s
