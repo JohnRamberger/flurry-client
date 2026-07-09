@@ -390,9 +390,11 @@ impl App {
         ui.separator();
         ui.label(format!("{ups} updates/s   {mbps:.2} Mbit/s"));
         if !self.stats.is_empty() {
-            egui::CollapsingHeader::new("3DS stats").show(ui, |ui| {
-                ui.label(&self.stats);
-            });
+            egui::CollapsingHeader::new("3DS stats")
+                .default_open(true)
+                .show(ui, |ui| {
+                    ui.label(&self.stats);
+                });
         }
         if !self.log.is_empty() {
             egui::CollapsingHeader::new("3DS log")
