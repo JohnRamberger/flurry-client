@@ -295,6 +295,8 @@ impl App {
             return;
         };
         let mut disconnect_reason = None;
+        let mut pending_top: Option<egui::ColorImage> = None;
+        let mut pending_bottom: Option<egui::ColorImage> = None;
         for ev in worker.events.try_iter() {
             match ev {
                 Event::Connected => {
@@ -335,14 +337,15 @@ impl App {
                             self.update_rects.pop_front();
                         }
                     }
-                    let (slot, name) = if bottom {
-                        (&mut self.bottom_tex, "bottom")
+                    // Coalesce: keep only the newest image per screen and
+                    // upload once after the drain. Uploading per event
+                    // queued dozens of full-texture deltas per UI frame —
+                    // wasted CPU and implicated in wgpu texture-validation
+                    // panics under load.
+                    if bottom {
+                        pending_bottom = Some(image);
                     } else {
-                        (&mut self.top_tex, "top")
-                    };
-                    match slot {
-                        Some(tex) => tex.set(image, egui::TextureOptions::LINEAR),
-                        None => *slot = Some(ctx.load_texture(name, image, egui::TextureOptions::LINEAR)),
+                        pending_top = Some(image);
                     }
                 }
                 Event::Stats(s) => {
@@ -359,6 +362,18 @@ impl App {
                 Event::Disconnected(reason) => disconnect_reason = Some(reason),
             }
         }
+        for (img, slot, name) in [
+            (pending_top, &mut self.top_tex, "top"),
+            (pending_bottom, &mut self.bottom_tex, "bottom"),
+        ] {
+            if let Some(image) = img {
+                match slot {
+                    Some(tex) => tex.set(image, egui::TextureOptions::LINEAR),
+                    None => *slot = Some(ctx.load_texture(name, image, egui::TextureOptions::LINEAR)),
+                }
+            }
+        }
+
         if let Some(reason) = disconnect_reason {
             self.conn = Conn::Idle;
             self.status = reason;
