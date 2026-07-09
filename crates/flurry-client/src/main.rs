@@ -950,14 +950,10 @@ impl App {
                         s.downscale = mode == 2;
                     }
                     SettingsTab::Performance => {
-                        knob(ui, ok(feature::CHUNKS), "Vertical strips each screen is captured in. 4 measured ~40% faster than 8 (fewer packets, less per-strip overhead).", |ui| {
-                            egui::ComboBox::from_label("Chunks per screen")
-                                .selected_text(format!("{}", s.chunks))
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(&mut s.chunks, 4u8, "4 (recommended)");
-                                    ui.selectable_value(&mut s.chunks, 8u8, "8 (legacy)");
-                                });
-                        });
+                        // Capture chunking is no longer user-facing: 4 wins
+                        // every measurement and the sysmodule falls back to
+                        // 8 automatically when memory is short. The wire
+                        // setting and the benchmark A/B sweep remain.
                         knob(ui, ok(feature::STRIP_SLEEP), "Pause between strips. 0 = fastest; raise a little if the console's WiFi or games get unstable while streaming.", |ui| {
                             ui.add(egui::Slider::new(&mut s.strip_sleep, 0..=20).text("Strip sleep (ms)"));
                         });
