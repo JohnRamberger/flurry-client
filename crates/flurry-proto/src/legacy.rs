@@ -42,6 +42,7 @@ pub mod setting {
     pub const CHUNKS: u8 = 0x09; // u8 payload: strips per screen on Old 3DS (2, 4 or 8)
     pub const STRIP_SLEEP: u8 = 0x0A; // u8 payload: ms pause between strips (0-20)
     pub const DOWNSCALE: u8 = 0x0B; // u8 payload: bool — quarter-res mode (Old 3DS)
+    pub const STATS_ENABLE: u8 = 0x0C; // u8 payload: bool — 1 Hz perf stats packets
 }
 
 /// Feature bits carried by the [`meta::ANNOUNCE`] packet.
@@ -52,6 +53,9 @@ pub mod feature {
     pub const CHUNKS: u8 = 1 << 3;
     pub const STRIP_SLEEP: u8 = 1 << 4;
     pub const DOWNSCALE: u8 = 1 << 5;
+    /// Stats are opt-in via [`setting::STATS_ENABLE`]. Sysmodules without
+    /// this bit but with an announce stream stats unconditionally.
+    pub const STATS_TOGGLE: u8 = 1 << 6;
 }
 
 /// Legacy screen-select values (1-based, unlike v1).
@@ -119,6 +123,10 @@ pub fn encode_strip_sleep(ms: u8) -> Vec<u8> {
 
 pub fn encode_downscale(on: bool) -> Vec<u8> {
     packet(pkt::SETTING, setting::DOWNSCALE, &[on as u8])
+}
+
+pub fn encode_stats_enabled(on: bool) -> Vec<u8> {
+    packet(pkt::SETTING, setting::STATS_ENABLE, &[on as u8])
 }
 
 /// Parsed legacy framing header.

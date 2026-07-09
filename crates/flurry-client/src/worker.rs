@@ -27,6 +27,7 @@ pub enum Cmd {
     SetChunks(u8),
     SetStripSleep(u8),
     SetDownscale(bool),
+    SetStatsEnabled(bool),
     Disconnect,
 }
 
@@ -118,6 +119,7 @@ pub fn spawn(addr: String, ctx: egui::Context, quality: u8, screen: ScreenSet, i
                     Cmd::SetChunks(c) => (legacy::encode_chunks(c), false),
                     Cmd::SetStripSleep(ms) => (legacy::encode_strip_sleep(ms), false),
                     Cmd::SetDownscale(d) => (legacy::encode_downscale(d), false),
+                    Cmd::SetStatsEnabled(e) => (legacy::encode_stats_enabled(e), false),
                     Cmd::Disconnect => (legacy::encode_disconnect(), true),
                 };
                 let _ = wr.write_all(&bytes);

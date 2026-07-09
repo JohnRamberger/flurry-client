@@ -189,9 +189,32 @@ struct App {
     new_profile_name: String,
     show_bench: bool,
     bench_goal: f32,
+    bench_sweep_chunks: bool,
+    bench_fine_quality: bool,
     bench: Option<bench::Bench>,
     bench_summary: Option<String>,
     bench_table: Vec<bench::BenchResult>,
+    /// Show 3DS stats/log; keeps the sysmodule stats packets enabled.
+    debug_stats: bool,
+    /// Latest parsed 3DS stats (for the benchmark).
+    stats_snap: bench::StatsSnap,
+}
+
+/// Parse the sysmodule's key=value stats text.
+fn parse_stats(text: &str) -> bench::StatsSnap {
+    let mut s = bench::StatsSnap::default();
+    for tok in text.split_whitespace() {
+        let Some((k, v)) = tok.split_once('=') else { continue };
+        let Ok(f) = v.parse::<f32>() else { continue };
+        match k {
+            "enc" => s.enc = f,
+            "send" => s.send = f,
+            "sent" => s.sent = f,
+            "skip" => s.skip = f,
+            _ => {}
+        }
+    }
+    s
 }
 
 impl App {
@@ -224,9 +247,21 @@ impl App {
             new_profile_name: String::new(),
             show_bench: false,
             bench_goal: 0.5,
+            bench_sweep_chunks: false,
+            bench_fine_quality: false,
             bench: None,
             bench_summary: None,
             bench_table: Vec::new(),
+            debug_stats: false,
+            stats_snap: bench::StatsSnap::default(),
+        }
+    }
+
+    fn send_stats_enabled(&self, on: bool) {
+        if let Conn::Active { worker, caps, .. } = &self.conn {
+            if caps.is_some_and(|a| a.has(feature::STATS_TOGGLE)) {
+                let _ = worker.cmds.send(Cmd::SetStatsEnabled(on));
+            }
         }
     }
 
@@ -268,6 +303,13 @@ impl App {
                         "Connected (extended rev {}, features {:#08b})",
                         a.revision, a.features
                     );
+                    // Stats are opt-in on toggle-capable sysmodules; enable
+                    // them if the user wants debug info or a bench is live.
+                    if a.has(feature::STATS_TOGGLE)
+                        && (self.debug_stats || self.bench.is_some())
+                    {
+                        let _ = worker.cmds.send(Cmd::SetStatsEnabled(true));
+                    }
                 }
                 Event::Screen { bottom, image, bytes, chunk } => {
                     self.meter.push(bytes, bottom, chunk);
@@ -281,7 +323,10 @@ impl App {
                         None => *slot = Some(ctx.load_texture(name, image, egui::TextureOptions::LINEAR)),
                     }
                 }
-                Event::Stats(s) => self.stats = s,
+                Event::Stats(s) => {
+                    self.stats_snap = parse_stats(&s);
+                    self.stats = s;
+                }
                 Event::Info(msg) => {
                     self.log.push_back(msg.clone());
                     while self.log.len() > 8 {
@@ -491,9 +536,6 @@ impl App {
                 self.show_bench = true;
             }
 
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(&self.status);
-            });
         });
     }
 
@@ -581,20 +623,44 @@ impl App {
                             let restore = self.bench.as_ref().unwrap().cancel();
                             self.settings = restore;
                             self.bench = None;
+                            self.send_stats_enabled(self.debug_stats);
                         }
                     }
                     None => {
+                        ui.checkbox(&mut self.bench_sweep_chunks, "Sweep chunk counts (8 vs 4)");
+                        ui.checkbox(&mut self.bench_fine_quality, "Fine quality sweep (3 points)");
+                        {
+                            let modes = if self
+                                .caps()
+                                .is_some_and(|a| a.has(feature::DOWNSCALE))
+                            {
+                                3
+                            } else {
+                                2
+                            };
+                            let n = modes
+                                * if self.bench_fine_quality { 3 } else { 2 }
+                                * if self.bench_sweep_chunks { 2 } else { 1 };
+                            ui.small(format!(
+                                "{} configs ≈ {:.0} s (streams BOTH screens; combined fps goal)",
+                                n,
+                                bench::Bench::estimate(n).as_secs_f32()
+                            ));
+                        }
                         if let Some(s) = &self.bench_summary {
+                            ui.separator();
                             ui.label(s.clone());
                         }
                         if !self.bench_table.is_empty() {
-                            ui.separator();
                             egui::Grid::new("bench_results")
                                 .striped(true)
-                                .min_col_width(70.0)
+                                .min_col_width(56.0)
                                 .show(ui, |ui| {
                                     ui.strong("Config");
                                     ui.strong("fps");
+                                    ui.strong("enc ms/s");
+                                    ui.strong("send ms/s");
+                                    ui.strong("skip/s");
                                     ui.strong("score");
                                     ui.end_row();
                                     for r in &self.bench_table {
@@ -605,6 +671,9 @@ impl App {
                                         };
                                         ui.label(label);
                                         ui.label(format!("{:.1}", r.fps));
+                                        ui.label(format!("{:.0}", r.stats.enc));
+                                        ui.label(format!("{:.0}", r.stats.send));
+                                        ui.label(format!("{:.0}", r.stats.skip));
                                         ui.label(format!("{:.2}", r.score));
                                         ui.end_row();
                                     }
@@ -617,8 +686,13 @@ impl App {
                             .clicked()
                         {
                             self.bench_summary = None;
+                            self.send_stats_enabled(true);
                             self.bench = Some(bench::Bench::start(
-                                self.bench_goal,
+                                bench::Options {
+                                    goal: self.bench_goal,
+                                    sweep_chunks: self.bench_sweep_chunks,
+                                    fine_quality: self.bench_fine_quality,
+                                },
                                 self.settings,
                                 self.caps(),
                             ));
@@ -633,19 +707,18 @@ impl App {
     }
 
     fn bench_tick(&mut self, ctx: &egui::Context) {
+        let fps = self.meter.fps(false) + self.meter.fps(true);
+        let snap = self.stats_snap;
         let Some(b) = &mut self.bench else { return };
         // Keep the stream on the config under test.
         self.settings = b.current_config();
-        let fps = {
-            let f = self.meter.fps(false) + self.meter.fps(true);
-            f
-        };
-        if let Some(winner) = b.tick(fps) {
+        if let Some(winner) = b.tick(fps, snap) {
             self.settings = winner;
             self.bench_summary = b.summary.clone();
             self.bench_table = b.table.clone();
             self.bench = None;
             self.status = self.bench_summary.clone().unwrap_or_default();
+            self.send_stats_enabled(self.debug_stats);
         }
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
     }
@@ -739,7 +812,18 @@ impl App {
         ui.separator();
         ui.strong(format!("Top {fps_top:.1} fps   Bottom {fps_bot:.1} fps"));
         ui.label(format!("{ups} strips/s   {mbps:.2} Mbit/s"));
-        if !self.stats.is_empty() {
+        if ui
+            .checkbox(&mut self.debug_stats, "Debug (3DS perf stats)")
+            .changed()
+        {
+            self.send_stats_enabled(self.debug_stats);
+            if !self.debug_stats {
+                self.stats.clear();
+            }
+        }
+        // Older sysmodules stream stats unconditionally; only show them
+        // when wanted (the packets are still parsed for benchmarks).
+        if self.debug_stats && !self.stats.is_empty() {
             egui::CollapsingHeader::new("3DS stats")
                 .default_open(true)
                 .show(ui, |ui| {
@@ -764,6 +848,10 @@ impl eframe::App for App {
 
         egui::Panel::top(egui::Id::new("toolbar")).show(ui, |ui| {
             self.toolbar(ui);
+        });
+
+        egui::Panel::bottom(egui::Id::new("statusbar")).show(ui, |ui| {
+            ui.small(&self.status);
         });
 
         egui::Panel::left(egui::Id::new("controls"))
