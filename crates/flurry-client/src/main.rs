@@ -846,7 +846,7 @@ impl App {
                                 if ui
                                     .add_enabled(
                                         !name.is_empty(),
-                                        egui::Button::new("💾 Save selection as profile"),
+                                        egui::Button::new("💾 Save selection as new profile"),
                                     )
                                     .clicked()
                                 {
@@ -857,6 +857,17 @@ impl App {
                                     self.device.profile = Some(name);
                                     self.store.upsert_device(self.device.clone());
                                     self.bench_profile_name.clear();
+                                }
+                                if let Some(current) = self.device.profile.clone() {
+                                    if ui
+                                        .button(format!("💾 Save to '{current}'"))
+                                        .clicked()
+                                    {
+                                        self.store.upsert_profile(Profile {
+                                            name: current,
+                                            settings: self.settings,
+                                        });
+                                    }
                                 }
                             });
                             if let Some(dir) = &self.bench_dir {
