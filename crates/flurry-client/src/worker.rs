@@ -35,11 +35,14 @@ pub enum Event {
     /// Extended sysmodule announced its feature set.
     Capabilities(legacy::Announce),
     /// A screen buffer changed. `bottom` selects which texture to update;
-    /// `bytes` is the wire size of the packet (for the bandwidth meter).
+    /// `bytes` is the wire size of the packet (for the bandwidth meter);
+    /// `chunk` is the strip index for chunked (Old 3DS) frames, used by the
+    /// client to infer strips-per-frame for the fps meter.
     Screen {
         bottom: bool,
         image: egui::ColorImage,
         bytes: usize,
+        chunk: Option<u8>,
     },
     Stats(String),
     /// Non-fatal notice (3DS-side error text, unsupported format, ...).
@@ -246,6 +249,7 @@ fn read_loop(mut stream: TcpStream, emit: &dyn Fn(Event)) -> String {
                     bottom: img.bottom,
                     image: buf.image.clone(),
                     bytes: legacy::HEADER_LEN + payload.len(),
+                    chunk: img.chunk,
                 });
             }
             pkt::META => match info.subtype {

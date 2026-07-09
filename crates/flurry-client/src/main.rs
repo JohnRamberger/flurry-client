@@ -118,21 +118,49 @@ enum Conn {
 #[derive(Default)]
 struct Meter {
     samples: VecDeque<(Instant, usize)>,
+    /// Strip arrivals per screen (0 top, 1 bottom): time + chunk index
+    /// (0 for unchunked full frames).
+    strips: [VecDeque<(Instant, u8)>; 2],
 }
 
 impl Meter {
-    fn push(&mut self, bytes: usize) {
-        self.samples.push_back((Instant::now(), bytes));
+    fn push(&mut self, bytes: usize, bottom: bool, chunk: Option<u8>) {
+        let now = Instant::now();
+        self.samples.push_back((now, bytes));
+        self.strips[bottom as usize].push_back((now, chunk.unwrap_or(0)));
     }
 
-    /// (updates per second, megabits per second) over the last second.
-    fn rates(&mut self) -> (usize, f32) {
+    fn reset(&mut self) {
+        *self = Meter::default();
+    }
+
+    fn trim(&mut self) {
         let cutoff = Instant::now() - std::time::Duration::from_secs(1);
         while self.samples.front().is_some_and(|(t, _)| *t < cutoff) {
             self.samples.pop_front();
         }
+        for s in &mut self.strips {
+            while s.front().is_some_and(|(t, _)| *t < cutoff) {
+                s.pop_front();
+            }
+        }
+    }
+
+    /// (updates per second, megabits per second) over the last second.
+    fn rates(&mut self) -> (usize, f32) {
+        self.trim();
         let bytes: usize = self.samples.iter().map(|(_, b)| b).sum();
         (self.samples.len(), bytes as f32 * 8.0 / 1_000_000.0)
+    }
+
+    /// Effective full-frame fps for a screen: strips/s divided by the
+    /// strips-per-frame inferred from the same window (max chunk index + 1;
+    /// 1 for unchunked streams). Tracks live chunk-count changes.
+    fn fps(&mut self, bottom: bool) -> f32 {
+        self.trim();
+        let s = &self.strips[bottom as usize];
+        let per_frame = s.iter().map(|(_, c)| *c).max().unwrap_or(0) as f32 + 1.0;
+        s.len() as f32 / per_frame
     }
 }
 
@@ -194,13 +222,15 @@ impl App {
                 Event::Connected => {
                     *connected = true;
                     self.status = "Connected".into();
+                    // Chunk-count inference must not carry across sessions.
+                    self.meter.reset();
                 }
                 Event::Capabilities(a) => {
                     *caps = Some(a);
                     self.status = format!("Connected (extended sysmodule rev {})", a.revision);
                 }
-                Event::Screen { bottom, image, bytes } => {
-                    self.meter.push(bytes);
+                Event::Screen { bottom, image, bytes, chunk } => {
+                    self.meter.push(bytes, bottom, chunk);
                     let (slot, name) = if bottom {
                         (&mut self.bottom_tex, "bottom")
                     } else {
@@ -419,8 +449,10 @@ impl App {
         });
 
         let (ups, mbps) = self.meter.rates();
+        let (fps_top, fps_bot) = (self.meter.fps(false), self.meter.fps(true));
         ui.separator();
-        ui.label(format!("{ups} updates/s   {mbps:.2} Mbit/s"));
+        ui.strong(format!("Top {fps_top:.1} fps   Bottom {fps_bot:.1} fps"));
+        ui.label(format!("{ups} strips/s   {mbps:.2} Mbit/s"));
         if !self.stats.is_empty() {
             egui::CollapsingHeader::new("3DS stats")
                 .default_open(true)
