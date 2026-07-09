@@ -26,6 +26,7 @@ pub enum Cmd {
     SetFpsCap(u8),
     SetChunks(u8),
     SetStripSleep(u8),
+    SetDownscale(bool),
     Disconnect,
 }
 
@@ -116,6 +117,7 @@ pub fn spawn(addr: String, ctx: egui::Context, quality: u8, screen: ScreenSet, i
                     Cmd::SetFpsCap(f) => (legacy::encode_fps_cap(f), false),
                     Cmd::SetChunks(c) => (legacy::encode_chunks(c), false),
                     Cmd::SetStripSleep(ms) => (legacy::encode_strip_sleep(ms), false),
+                    Cmd::SetDownscale(d) => (legacy::encode_downscale(d), false),
                     Cmd::Disconnect => (legacy::encode_disconnect(), true),
                 };
                 let _ = wr.write_all(&bytes);
@@ -169,12 +171,27 @@ impl ScreenBuf {
     /// framebuffer orientation — decoded row `r` is one screen *column*,
     /// bottom-to-top. `x = row_offset + r`, `y = 239 - c`. Interlaced
     /// frames carry every other pixel of each fb row (image width 120);
-    /// v0 line-doubles them instead of weaving fields.
-    fn paste(&mut self, rgb: &[u8], iw: usize, ih: usize, row_offset: usize, interlaced: bool) {
+    /// v0 line-doubles them instead of weaving fields. Quarter-res frames
+    /// (`downscaled`) halve both axes; each pixel covers a 2x2 block.
+    fn paste(
+        &mut self,
+        rgb: &[u8],
+        iw: usize,
+        ih: usize,
+        row_offset: usize,
+        interlaced: bool,
+        downscaled: bool,
+    ) {
         let w = self.image.size[0];
-        let step = if interlaced { 2 } else { 1 };
+        let (xstep, ystep) = if downscaled {
+            (2, 2)
+        } else if interlaced {
+            (1, 2)
+        } else {
+            (1, 1)
+        };
         for r in 0..ih {
-            let x = row_offset + r;
+            let x = row_offset + r * xstep;
             if x >= w {
                 break;
             }
@@ -183,10 +200,15 @@ impl ScreenBuf {
                 // 3DS framebuffers are BGR; the sysmodule JPEG-encodes the
                 // raw bytes as if RGB, so swap back here.
                 let px = egui::Color32::from_rgb(rgb[i + 2], rgb[i + 1], rgb[i]);
-                let y = 239usize.saturating_sub(c * step);
-                self.image.pixels[y * w + x] = px;
-                if interlaced && y > 0 {
-                    self.image.pixels[(y - 1) * w + x] = px; // line-double
+                let y = 239usize.saturating_sub(c * ystep);
+                for dx in 0..xstep {
+                    if x + dx >= w {
+                        break;
+                    }
+                    self.image.pixels[y * w + x + dx] = px;
+                    if ystep == 2 && y > 0 {
+                        self.image.pixels[(y - 1) * w + x + dx] = px; // fill gap
+                    }
                 }
             }
         }
@@ -242,9 +264,10 @@ fn read_loop(mut stream: TcpStream, emit: &dyn Fn(Event)) -> String {
                     )));
                     continue;
                 }
-                let row_offset = img.chunk.map(|i| i as usize * ih).unwrap_or(0);
+                let scale = if img.downscaled { 2 } else { 1 };
+                let row_offset = img.chunk.map(|i| i as usize * ih * scale).unwrap_or(0);
                 let buf = if img.bottom { &mut bottom } else { &mut top };
-                buf.paste(&rgb, iw, ih, row_offset, img.interlaced);
+                buf.paste(&rgb, iw, ih, row_offset, img.interlaced, img.downscaled);
                 emit(Event::Screen {
                     bottom: img.bottom,
                     image: buf.image.clone(),

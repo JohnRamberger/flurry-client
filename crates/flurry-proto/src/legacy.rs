@@ -41,6 +41,7 @@ pub mod setting {
     pub const FPS_CAP: u8 = 0x08; // u8 payload: target fps (0 = uncapped)
     pub const CHUNKS: u8 = 0x09; // u8 payload: strips per screen on Old 3DS (2, 4 or 8)
     pub const STRIP_SLEEP: u8 = 0x0A; // u8 payload: ms pause between strips (0-20)
+    pub const DOWNSCALE: u8 = 0x0B; // u8 payload: bool — quarter-res mode (Old 3DS)
 }
 
 /// Feature bits carried by the [`meta::ANNOUNCE`] packet.
@@ -50,6 +51,7 @@ pub mod feature {
     pub const OLD3DS_INTERLACE: u8 = 1 << 2;
     pub const CHUNKS: u8 = 1 << 3;
     pub const STRIP_SLEEP: u8 = 1 << 4;
+    pub const DOWNSCALE: u8 = 1 << 5;
 }
 
 /// Legacy screen-select values (1-based, unlike v1).
@@ -115,6 +117,10 @@ pub fn encode_strip_sleep(ms: u8) -> Vec<u8> {
     packet(pkt::SETTING, setting::STRIP_SLEEP, &[ms])
 }
 
+pub fn encode_downscale(on: bool) -> Vec<u8> {
+    packet(pkt::SETTING, setting::DOWNSCALE, &[on as u8])
+}
+
 /// Parsed legacy framing header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PacketInfo {
@@ -154,6 +160,9 @@ pub struct ImageInfo {
     pub interlaced: bool,
     /// Subtype bit 6 (only meaningful when `interlaced`).
     pub interlace_phase: bool,
+    /// Subtype bit 7 (Flurry extension): quarter-res frame — both axes
+    /// halved on the 3DS; the client scales each pixel to 2x2.
+    pub downscaled: bool,
     /// Old-3DS chunk index 0–7; `None` when the packet is a full frame.
     pub chunk: Option<u8>,
 }
@@ -166,6 +175,7 @@ impl ImageInfo {
             pixfmt: info.subtype & 0b0000_0111,
             interlaced: info.subtype & 0b0010_0000 != 0,
             interlace_phase: info.subtype & 0b0100_0000 != 0,
+            downscaled: info.subtype & 0b1000_0000 != 0,
             // Old 3DS sets subtypeB = 0b1000 + chunk_index.
             chunk: (info.subtype_b & 0b0000_1000 != 0).then_some(info.subtype_b & 0b0111),
         }

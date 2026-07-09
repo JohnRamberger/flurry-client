@@ -54,6 +54,8 @@ pub struct Settings {
     pub chunks: u8,
     /// Pause between strips in ms (Old 3DS pacing floor). Extension knob.
     pub strip_sleep: u8,
+    /// Quarter-res mode (Old 3DS): ~4x encode speedup, 2x2 upscale. Extension knob.
+    pub downscale: bool,
 }
 
 impl Default for Settings {
@@ -71,6 +73,7 @@ impl Default for Settings {
             // +65% sent fps over the legacy 8/5ms (see flurry PERF notes).
             chunks: 4,
             strip_sleep: 0,
+            downscale: false,
         };
         s.apply_master();
         s
@@ -88,6 +91,8 @@ impl Settings {
         // Uncapped fps toward the fps end; give the encoder breathing room
         // (and thus better quality per frame) toward the quality end.
         self.fps_cap = if m < 0.75 { 0 } else { 24 };
+        // Far fps end: quarter-res for ~4x encode speedup.
+        self.downscale = m < 0.25;
         // Strip skip always pays; refresh faster when quality-focused.
         self.strip_skip = true;
         self.refresh_interval = if m < 0.5 { 64 } else { 32 };
@@ -295,6 +300,9 @@ impl App {
             if a.has(feature::STRIP_SLEEP) && sent.strip_sleep != s.strip_sleep {
                 let _ = worker.cmds.send(Cmd::SetStripSleep(s.strip_sleep));
             }
+            if a.has(feature::DOWNSCALE) && sent.downscale != s.downscale {
+                let _ = worker.cmds.send(Cmd::SetDownscale(s.downscale));
+            }
         }
         *sent = self.settings;
     }
@@ -441,6 +449,13 @@ impl App {
                 ui.add(
                     egui::Slider::new(&mut s.strip_sleep, 0..=20)
                         .text(format!("Strip sleep ms{}", ext(sleep_ok))),
+                );
+            });
+            let ds_ok = caps.is_some_and(|a| a.has(feature::DOWNSCALE));
+            ui.add_enabled_ui(ds_ok || matches!(self.conn, Conn::Idle), |ui| {
+                ui.checkbox(
+                    &mut s.downscale,
+                    format!("Quarter-res (~4x faster){}", ext(ds_ok)),
                 );
             });
             if *s != before {
