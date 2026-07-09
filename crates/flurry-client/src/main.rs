@@ -170,11 +170,16 @@ struct App {
     new_profile_name: String,
     show_bench: bool,
     bench_goal: f32,
-    bench_sweep_chunks: bool,
-    bench_fine_quality: bool,
+    bench_depth: u8,
+    bench_motion: bench::Motion,
     bench: Option<bench::Bench>,
     bench_summary: Option<String>,
     bench_table: Vec<bench::BenchResult>,
+    /// Settings before the run (the "Previous settings" table row).
+    bench_prev: Option<Settings>,
+    /// Selected table row (None = previous settings).
+    bench_selected: Option<usize>,
+    bench_profile_name: String,
     /// Show 3DS stats/log; keeps the sysmodule stats packets enabled.
     debug_stats: bool,
     /// Latest parsed 3DS stats (for the benchmark).
@@ -249,11 +254,14 @@ impl App {
             new_profile_name: String::new(),
             show_bench: false,
             bench_goal: 0.5,
-            bench_sweep_chunks: false,
-            bench_fine_quality: false,
+            bench_depth: 1,
+            bench_motion: bench::Motion::TopMoves,
             bench: None,
             bench_summary: None,
             bench_table: Vec::new(),
+            bench_prev: None,
+            bench_selected: None,
+            bench_profile_name: String::new(),
             debug_stats: false,
             stats_snap: bench::StatsSnap::default(),
             last_top: None,
@@ -717,35 +725,56 @@ impl App {
                         }
                     }
                     None => {
-                        ui.checkbox(&mut self.bench_sweep_chunks, "Sweep chunk counts (8 vs 4)");
-                        ui.checkbox(&mut self.bench_fine_quality, "Fine quality sweep (3 points)");
-                        {
-                            let modes = if self
-                                .caps()
-                                .is_some_and(|a| a.has(feature::DOWNSCALE))
-                            {
-                                3
-                            } else {
-                                2
-                            };
-                            let n = modes
-                                * if self.bench_fine_quality { 3 } else { 2 }
-                                * if self.bench_sweep_chunks { 2 } else { 1 };
-                            ui.small(format!(
-                                "{} configs ≈ {:.0} s (streams BOTH screens; combined fps goal)",
-                                n,
-                                bench::Bench::estimate(n).as_secs_f32()
-                            ));
-                        }
+                        // Sweep depth: stepped slider with a time estimate.
+                        let depth_name = ["Quick", "Standard", "Thorough", "Exhaustive"]
+                            [self.bench_depth.min(3) as usize];
+                        let has_ds =
+                            self.caps().is_some_and(|a| a.has(feature::DOWNSCALE));
+                        let has_ch = self.caps().is_some_and(|a| a.has(feature::CHUNKS));
+                        let n = bench::plan_len(self.bench_depth, has_ds, has_ch);
+                        ui.add(
+                            egui::Slider::new(&mut self.bench_depth, 0..=3)
+                                .show_value(false)
+                                .text(format!(
+                                    "{depth_name}: {n} configs ≈ {:.0} s",
+                                    bench::Bench::estimate(n).as_secs_f32()
+                                )),
+                        );
+                        egui::ComboBox::from_label("Moving content")
+                            .selected_text(match self.bench_motion {
+                                bench::Motion::TopMoves => "Top screen (bottom static)",
+                                bench::Motion::BothMove => "Both screens (in-game)",
+                                bench::Motion::BottomMoves => "Bottom screen (top static)",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut self.bench_motion,
+                                    bench::Motion::TopMoves,
+                                    "Top screen (bottom static)",
+                                );
+                                ui.selectable_value(
+                                    &mut self.bench_motion,
+                                    bench::Motion::BothMove,
+                                    "Both screens (in-game)",
+                                );
+                                ui.selectable_value(
+                                    &mut self.bench_motion,
+                                    bench::Motion::BottomMoves,
+                                    "Bottom screen (top static)",
+                                );
+                            });
+                        ui.small("Scores the fps of the moving screen(s); the other stays a diagnostic.");
                         if let Some(s) = &self.bench_summary {
                             ui.separator();
                             ui.label(s.clone());
                         }
                         if !self.bench_table.is_empty() {
+                            let mut apply: Option<Settings> = None;
                             egui::Grid::new("bench_results")
                                 .striped(true)
-                                .min_col_width(56.0)
+                                .min_col_width(48.0)
                                 .show(ui, |ui| {
+                                    ui.strong("");
                                     ui.strong("Config");
                                     ui.strong("top fps");
                                     ui.strong("bot fps");
@@ -758,7 +787,32 @@ impl App {
                                     ui.strong("torn/s");
                                     ui.strong("score");
                                     ui.end_row();
-                                    for r in &self.bench_table {
+
+                                    // Baseline row: the settings from before
+                                    // the run — select to revert.
+                                    if let Some(prev) = self.bench_prev {
+                                        if ui
+                                            .radio(self.bench_selected.is_none(), "")
+                                            .clicked()
+                                        {
+                                            self.bench_selected = None;
+                                            apply = Some(prev);
+                                        }
+                                        ui.label("(previous settings)");
+                                        for _ in 0..10 {
+                                            ui.label("—");
+                                        }
+                                        ui.end_row();
+                                    }
+
+                                    for (i, r) in self.bench_table.iter().enumerate() {
+                                        if ui
+                                            .radio(self.bench_selected == Some(i), "")
+                                            .clicked()
+                                        {
+                                            self.bench_selected = Some(i);
+                                            apply = Some(r.settings);
+                                        }
                                         let label = if r.winner {
                                             format!("★ {}", r.label)
                                         } else {
@@ -778,6 +832,33 @@ impl App {
                                         ui.end_row();
                                     }
                                 });
+                            if let Some(s) = apply {
+                                // Applies live via push_settings.
+                                self.settings = s;
+                            }
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.bench_profile_name)
+                                        .hint_text("profile name")
+                                        .desired_width(140.0),
+                                );
+                                let name = self.bench_profile_name.trim().to_string();
+                                if ui
+                                    .add_enabled(
+                                        !name.is_empty(),
+                                        egui::Button::new("💾 Save selection as profile"),
+                                    )
+                                    .clicked()
+                                {
+                                    self.store.upsert_profile(Profile {
+                                        name: name.clone(),
+                                        settings: self.settings,
+                                    });
+                                    self.device.profile = Some(name);
+                                    self.store.upsert_device(self.device.clone());
+                                    self.bench_profile_name.clear();
+                                }
+                            });
                             if let Some(dir) = &self.bench_dir {
                                 ui.small(format!("Screenshots: {}", dir.display()));
                             }
@@ -789,6 +870,8 @@ impl App {
                             .clicked()
                         {
                             self.bench_summary = None;
+                            self.bench_prev = Some(self.settings);
+                            self.bench_selected = None;
                             self.send_stats_enabled(true);
                             self.bench_dir = dirs::config_dir().map(|d| {
                                 d.join("flurry-client").join("bench").join(format!(
@@ -802,8 +885,8 @@ impl App {
                             self.bench = Some(bench::Bench::start(
                                 bench::Options {
                                     goal: self.bench_goal,
-                                    sweep_chunks: self.bench_sweep_chunks,
-                                    fine_quality: self.bench_fine_quality,
+                                    depth: self.bench_depth,
+                                    motion: self.bench_motion,
                                 },
                                 self.settings,
                                 self.caps(),
@@ -841,11 +924,14 @@ impl App {
                 }
             }
         }
-        if let Some(winner) = finished {
-            self.settings = winner;
+        if let Some(previous) = finished {
+            // No auto-apply: restore the pre-run settings; the user picks a
+            // result row to try configs live.
+            self.settings = previous;
             self.bench_summary = b.summary.clone();
             self.bench_table = b.table.clone();
             self.bench = None;
+            self.bench_selected = None;
             self.last_top = None;
             self.status = self.bench_summary.clone().unwrap_or_default();
             self.send_stats_enabled(self.debug_stats);

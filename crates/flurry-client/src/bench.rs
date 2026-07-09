@@ -40,15 +40,51 @@ pub struct StatsSnap {
     pub torn: f32,
 }
 
+/// Which screen carries the moving content — decides which fps the score
+/// uses (the other screen's rate stays visible as a diagnostic).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Motion {
+    /// Top screen moves, bottom static (the Flurry test pattern).
+    TopMoves,
+    /// Both screens move (in-game benchmarking).
+    BothMove,
+    /// Bottom screen moves, top static.
+    BottomMoves,
+}
+
 /// What to sweep.
 #[derive(Clone, Copy)]
 pub struct Options {
     /// 0.0 = pure fps, 1.0 = pure quality.
     pub goal: f32,
-    /// Also A/B chunk counts (8 vs 4) on capable sysmodules.
-    pub sweep_chunks: bool,
-    /// Three quality points instead of two.
-    pub fine_quality: bool,
+    /// Sweep depth 0..=3: Quick / Standard / Thorough / Exhaustive.
+    pub depth: u8,
+    pub motion: Motion,
+}
+
+fn depth_qualities(depth: u8) -> &'static [u8] {
+    match depth {
+        0 => &[70],
+        1 => &[45, 90],
+        _ => &[45, 70, 90],
+    }
+}
+
+/// Number of configs a run at `depth` will test (for the UI time estimate).
+pub fn plan_len(depth: u8, has_downscale: bool, has_chunks: bool) -> usize {
+    let modes = if depth == 0 {
+        2
+    } else if has_downscale {
+        3
+    } else {
+        2
+    };
+    let n = modes * depth_qualities(depth).len();
+    if depth >= 3 && has_chunks {
+        n * 2
+    } else {
+        n
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -77,6 +113,9 @@ pub struct Bench {
 #[derive(Clone)]
 pub struct BenchResult {
     pub label: String,
+    /// The full settings of this config (screen restored to the user's
+    /// selection) — applied live when the row is selected.
+    pub settings: Settings,
     /// Top-screen (moving content) fps — the score's fps input.
     pub fps: f32,
     /// Bottom-screen fps — diagnostic; should be near the forced-refresh
@@ -144,20 +183,26 @@ impl Bench {
         }
         base.fps_cap = 0;
 
-        let qualities: &[u8] = if opts.fine_quality {
-            &[45, 70, 90]
-        } else {
-            &[45, 90]
-        };
-        let chunk_opts: &[u8] = if opts.sweep_chunks && has(feature::CHUNKS) {
+        let qualities: &[u8] = depth_qualities(opts.depth);
+        let chunk_opts: &[u8] = if opts.depth >= 3 && has(feature::CHUNKS) {
             &[4, 8]
         } else {
             &[0] // sentinel: keep base
         };
+        // Quick depth: progressive plus the strongest available decimation.
+        let modes: &[(bool, bool)] = if opts.depth == 0 {
+            if has(feature::DOWNSCALE) {
+                &[(false, false), (false, true)]
+            } else {
+                &[(false, false), (true, false)]
+            }
+        } else {
+            &[(false, false), (true, false), (false, true)]
+        };
 
         let mut plan = Vec::new();
         for &chunks in chunk_opts {
-            for &(interlace, downscale) in &[(false, false), (true, false), (false, true)] {
+            for &(interlace, downscale) in modes {
                 if downscale && !has(feature::DOWNSCALE) {
                     continue;
                 }
@@ -304,10 +349,20 @@ impl Bench {
                         self.plan[i].1
                     }
                 };
+                // The scored fps depends on where the motion is.
+                let scored = |i: usize| -> f32 {
+                    let (fps, bot, _, _, _) = self.results[i];
+                    match self.opts.motion {
+                        Motion::TopMoves => fps,
+                        Motion::BothMove => fps + bot,
+                        Motion::BottomMoves => bot,
+                    }
+                };
                 let mut best = 0usize;
                 let mut best_score = f32::MIN;
-                for (i, (fps, _, _, _, _)) in self.results.iter().enumerate() {
-                    let score = (1.0 - g) * (fps / FPS_TARGET).min(1.0) + g * quality_of(i);
+                for i in 0..self.results.len() {
+                    let score =
+                        (1.0 - g) * (scored(i) / FPS_TARGET).min(1.0) + g * quality_of(i);
                     if score > best_score {
                         best_score = score;
                         best = i;
@@ -317,6 +372,10 @@ impl Bench {
                     .map(|i| {
                         let (cfg, _) = &self.plan[i];
                         let (fps, bot, stats, sharp, block) = self.results[i];
+                        // The forced both-screens view was for measurement
+                        // only; applied settings keep the user's screen.
+                        let mut settings = *cfg;
+                        settings.screen = self.restore.screen;
                         BenchResult {
                             label: format!(
                                 "{} q={} c={}",
@@ -324,12 +383,13 @@ impl Bench {
                                 cfg.quality,
                                 cfg.chunks
                             ),
+                            settings,
                             fps,
                             bot,
                             stats,
                             sharp,
                             block,
-                            score: (1.0 - g) * (fps / FPS_TARGET).min(1.0)
+                            score: (1.0 - g) * (scored(i) / FPS_TARGET).min(1.0)
                                 + g * quality_of(i),
                             winner: i == best,
                         }
@@ -340,17 +400,16 @@ impl Bench {
                         .partial_cmp(&a.score)
                         .unwrap_or(std::cmp::Ordering::Equal)
                 });
-                let (mut win, _) = self.plan[best];
-                // The forced both-screens view was for measurement only.
-                win.screen = self.restore.screen;
+                let (win, _) = self.plan[best];
                 self.summary = Some(format!(
-                    "Winner: {} q={} — {:.1} top fps (score {:.2})",
+                    "Top result: {} q={} — {:.1} fps (score {:.2}). Select a row to try it live.",
                     mode_name(&win),
                     win.quality,
-                    self.results[best].0,
+                    scored(best),
                     best_score,
                 ));
-                Some(win)
+                // No auto-apply: hand back the user's previous settings.
+                Some(self.restore)
             }
         }
     }
