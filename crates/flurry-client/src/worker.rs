@@ -342,11 +342,18 @@ fn read_loop(mut stream: TcpStream, emit: &dyn Fn(Event)) -> String {
                     emit(Event::Info(format!("v2 region error: {e}")));
                 }
             }
+            // Stage-2 sysmodules send one strip per SFRAME; expose its
+            // strip index (x / width) so the fps meter can infer strips-
+            // per-frame. True multi-region passes count as whole frames.
+            let chunk = match sf.regions.as_slice() {
+                [only] if only.w > 0 && only.w < 400 => Some((only.x / only.w) as u8),
+                _ => None,
+            };
             emit(Event::Screen {
                 bottom: bottom_screen,
                 image: buf.image.clone(),
                 bytes: v2::SFRAME_HEADER_LEN + payload.len(),
-                chunk: None, // one SFRAME = one capture pass = one "frame"
+                chunk,
             });
             continue;
         }
