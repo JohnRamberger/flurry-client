@@ -1143,6 +1143,7 @@ impl App {
                                     ui.selectable_value(&mut s.grid_rows, 2u8, "2");
                                     ui.selectable_value(&mut s.grid_rows, 4u8, "4");
                                     ui.selectable_value(&mut s.grid_rows, 8u8, "8");
+                                    ui.selectable_value(&mut s.grid_rows, 16u8, "16");
                                 });
                         });
                     }
