@@ -202,6 +202,10 @@ struct App {
     /// CPU copy of the latest decoded top-screen frame (kept only while a
     /// benchmark runs; feeds the quality metrics and screenshots).
     last_top: Option<egui::ColorImage>,
+    /// Update-overlay debug view: recently updated screen rects, drawn as
+    /// fading red boxes over the video.
+    show_updates: bool,
+    update_rects: VecDeque<(Instant, bool, [u16; 4])>,
     /// Screenshot folder of the current/last benchmark run.
     bench_dir: Option<std::path::PathBuf>,
 }
@@ -262,6 +266,8 @@ impl App {
             stats_snap: bench::StatsSnap::default(),
             last_top: None,
             bench_dir: None,
+            show_updates: false,
+            update_rects: VecDeque::new(),
         }
     }
 
@@ -323,10 +329,19 @@ impl App {
                         let _ = worker.cmds.send(Cmd::SetV2Enabled(true));
                     }
                 }
-                Event::Screen { bottom, image, bytes, chunk } => {
+                Event::Screen { bottom, image, bytes, chunk, rects } => {
                     self.meter.push(bytes, bottom, chunk);
                     if !bottom && self.bench.is_some() {
                         self.last_top = Some(image.clone());
+                    }
+                    if self.show_updates {
+                        let now = Instant::now();
+                        for r in rects {
+                            self.update_rects.push_back((now, bottom, r));
+                        }
+                        while self.update_rects.len() > 256 {
+                            self.update_rects.pop_front();
+                        }
                     }
                     let (slot, name) = if bottom {
                         (&mut self.bottom_tex, "bottom")
@@ -805,6 +820,51 @@ impl App {
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
     }
 
+    /// Update-overlay debug view: fading red boxes over recently updated
+    /// screen regions (strips today, dirty rects once Stage 3 lands).
+    fn draw_update_overlay(&mut self, ui: &egui::Ui, rect: egui::Rect, bottom: bool, scale: f32) {
+        if !self.show_updates {
+            return;
+        }
+        let now = Instant::now();
+        while self
+            .update_rects
+            .front()
+            .is_some_and(|(t, _, _)| now.duration_since(*t).as_millis() > 400)
+        {
+            self.update_rects.pop_front();
+        }
+        let painter = ui.painter();
+        let mut any = false;
+        for (t, b, r) in &self.update_rects {
+            if *b != bottom {
+                continue;
+            }
+            let age = now.duration_since(*t).as_secs_f32() / 0.4;
+            let alpha = ((1.0 - age).clamp(0.0, 1.0) * 220.0) as u8;
+            if alpha == 0 {
+                continue;
+            }
+            any = true;
+            let rr = egui::Rect::from_min_size(
+                egui::pos2(
+                    rect.left() + r[0] as f32 * scale,
+                    rect.top() + r[1] as f32 * scale,
+                ),
+                egui::vec2(r[2] as f32 * scale, r[3] as f32 * scale),
+            );
+            painter.rect_stroke(
+                rr,
+                0.0,
+                egui::Stroke::new(1.5, egui::Color32::from_rgba_unmultiplied(255, 40, 40, alpha)),
+                egui::StrokeKind::Inside,
+            );
+        }
+        if any {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(16));
+        }
+    }
+
     fn controls_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("Stream");
         let master = ui.add(
@@ -903,6 +963,13 @@ impl App {
                 self.stats.clear();
             }
         }
+        if ui
+            .checkbox(&mut self.show_updates, "Show updates (overlay)")
+            .changed()
+            && !self.show_updates
+        {
+            self.update_rects.clear();
+        }
         // Older sysmodules stream stats unconditionally; only show them
         // when wanted (the packets are still parsed for benchmarks).
         if self.debug_stats && !self.stats.is_empty() {
@@ -962,13 +1029,15 @@ impl eframe::App for App {
                 let scale = (avail.x / 400.0).min(avail.y / total_h.max(240.0)).max(0.1);
                 if show_top {
                     if let Some(tex) = &self.top_tex {
-                        ui.image((tex.id(), egui::vec2(400.0 * scale, 240.0 * scale)));
+                        let resp = ui.image((tex.id(), egui::vec2(400.0 * scale, 240.0 * scale)));
+                        self.draw_update_overlay(ui, resp.rect, false, scale);
                         drew = true;
                     }
                 }
                 if show_bottom {
                     if let Some(tex) = &self.bottom_tex {
-                        ui.image((tex.id(), egui::vec2(320.0 * scale, 240.0 * scale)));
+                        let resp = ui.image((tex.id(), egui::vec2(320.0 * scale, 240.0 * scale)));
+                        self.draw_update_overlay(ui, resp.rect, true, scale);
                         drew = true;
                     }
                 }

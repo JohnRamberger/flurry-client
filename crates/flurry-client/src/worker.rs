@@ -46,6 +46,9 @@ pub enum Event {
         image: egui::ColorImage,
         bytes: usize,
         chunk: Option<u8>,
+        /// Screen-space rects updated by this packet (x, y, w, h) — feeds
+        /// the client's update-overlay debug view.
+        rects: Vec<[u16; 4]>,
     },
     Stats(String),
     /// Non-fatal notice (3DS-side error text, unsupported format, ...).
@@ -349,11 +352,13 @@ fn read_loop(mut stream: TcpStream, emit: &dyn Fn(Event)) -> String {
                 [only] if only.w > 0 && only.w < 400 => Some((only.x / only.w) as u8),
                 _ => None,
             };
+            let rects = sf.regions.iter().map(|r| [r.x, r.y, r.w, r.h]).collect();
             emit(Event::Screen {
                 bottom: bottom_screen,
                 image: buf.image.clone(),
                 bytes: v2::SFRAME_HEADER_LEN + payload.len(),
                 chunk,
+                rects,
             });
             continue;
         }
@@ -401,11 +406,13 @@ fn read_loop(mut stream: TcpStream, emit: &dyn Fn(Event)) -> String {
                 let row_offset = img.chunk.map(|i| i as usize * ih * scale).unwrap_or(0);
                 let buf = if img.bottom { &mut bottom } else { &mut top };
                 buf.paste(&rgb, iw, ih, row_offset, img.interlaced, img.downscaled);
+                let rects = vec![[row_offset as u16, 0, (ih * scale) as u16, 240]];
                 emit(Event::Screen {
                     bottom: img.bottom,
                     image: buf.image.clone(),
                     bytes: legacy::HEADER_LEN + payload.len(),
                     chunk: img.chunk,
+                    rects,
                 });
             }
             pkt::META => match info.subtype {
