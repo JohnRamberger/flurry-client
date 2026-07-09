@@ -15,7 +15,7 @@ mod worker;
 use std::collections::VecDeque;
 use std::time::Instant;
 
-use flurry_proto::legacy::{feature, Announce, ScreenSet};
+use flurry_proto::legacy::{feature, feature2, Announce, ScreenSet};
 use profiles::{Device, Profile, DEVICE_TYPES};
 use serde::{Deserialize, Serialize};
 use worker::{Cmd, Event, Worker};
@@ -59,6 +59,8 @@ pub struct Settings {
     pub strip_sleep: u8,
     /// Quarter-res mode (Old 3DS): ~4x encode speedup, 2x2 upscale. Extension knob.
     pub downscale: bool,
+    /// Dirty-cell preset: 0 = 10x60 (default), 1 = fine 5x30, 2 = coarse 25x120.
+    pub cell_size: u8,
 }
 
 impl Default for Settings {
@@ -77,6 +79,7 @@ impl Default for Settings {
             chunks: 4,
             strip_sleep: 0,
             downscale: false,
+            cell_size: 0,
         };
         s.apply_master();
         s
@@ -428,6 +431,10 @@ impl App {
                 let _ = worker.cmds.send(Cmd::SetDownscale(s.downscale));
                 sent.downscale = s.downscale;
             }
+            if a.has2(feature2::CELL_SIZE) && sent.cell_size != s.cell_size {
+                let _ = worker.cmds.send(Cmd::SetCellSize(s.cell_size));
+                sent.cell_size = s.cell_size;
+            }
         }
         // Master-slider bookkeeping fields aren't wire state; mirror them so
         // the cheap equality early-out above keeps working.
@@ -466,6 +473,7 @@ impl App {
             chunks: 8,
             strip_sleep: 5,
             downscale: false,
+            cell_size: 0,
             ..self.settings
         };
         self.conn = Conn::Active {
@@ -943,6 +951,20 @@ impl App {
                     &mut s.downscale,
                     format!("Quarter-res (~4x faster){}", ext(ds_ok)),
                 );
+            });
+            let cell_ok = caps.is_some_and(|a| a.has2(feature2::CELL_SIZE));
+            ui.add_enabled_ui(cell_ok || idle, |ui| {
+                egui::ComboBox::from_label(format!("Dirty cells{}", ext(cell_ok)))
+                    .selected_text(match s.cell_size {
+                        1 => "Fine (5x30)",
+                        2 => "Coarse (25x120)",
+                        _ => "Default (10x60)",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut s.cell_size, 0u8, "Default (10x60)");
+                        ui.selectable_value(&mut s.cell_size, 1u8, "Fine (5x30)");
+                        ui.selectable_value(&mut s.cell_size, 2u8, "Coarse (25x120)");
+                    });
             });
             if *s != before {
                 s.custom = true;

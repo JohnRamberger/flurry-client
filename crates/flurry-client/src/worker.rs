@@ -29,6 +29,7 @@ pub enum Cmd {
     SetDownscale(bool),
     SetStatsEnabled(bool),
     SetV2Enabled(bool),
+    SetCellSize(u8),
     Disconnect,
 }
 
@@ -125,6 +126,7 @@ pub fn spawn(addr: String, ctx: egui::Context, quality: u8, screen: ScreenSet, i
                     Cmd::SetDownscale(d) => (legacy::encode_downscale(d), false),
                     Cmd::SetStatsEnabled(e) => (legacy::encode_stats_enabled(e), false),
                     Cmd::SetV2Enabled(e) => (legacy::encode_v2_enable(e), false),
+                    Cmd::SetCellSize(c) => (legacy::encode_cell_size(c), false),
                     Cmd::Disconnect => (legacy::encode_disconnect(), true),
                 };
                 let _ = wr.write_all(&bytes);

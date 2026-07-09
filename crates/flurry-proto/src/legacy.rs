@@ -44,6 +44,12 @@ pub mod setting {
     pub const DOWNSCALE: u8 = 0x0B; // u8 payload: bool — quarter-res mode (Old 3DS)
     pub const STATS_ENABLE: u8 = 0x0C; // u8 payload: bool — 1 Hz perf stats packets
     pub const V2_ENABLE: u8 = 0x0F; // u8 payload: bool — switch to protocol v2 framing
+    pub const CELL_SIZE: u8 = 0x10; // u8 payload: dirty-cell preset (0=10x60, 1=5x30, 2=25x120)
+}
+
+/// Second feature byte (announce payload byte 2; absent on older builds).
+pub mod feature2 {
+    pub const CELL_SIZE: u8 = 1 << 0;
 }
 
 /// Feature bits carried by the [`meta::ANNOUNCE`] packet.
@@ -64,6 +70,10 @@ pub mod feature {
 
 pub fn encode_v2_enable(on: bool) -> Vec<u8> {
     packet(pkt::SETTING, setting::V2_ENABLE, &[on as u8])
+}
+
+pub fn encode_cell_size(preset: u8) -> Vec<u8> {
+    packet(pkt::SETTING, setting::CELL_SIZE, &[preset])
 }
 
 /// Legacy screen-select values (1-based, unlike v1).
@@ -222,6 +232,8 @@ pub mod meta {
 pub struct Announce {
     pub revision: u8,
     pub features: u8,
+    /// Second feature byte; 0 on sysmodules that predate it.
+    pub features2: u8,
 }
 
 impl Announce {
@@ -232,11 +244,16 @@ impl Announce {
         Ok(Announce {
             revision: payload[0],
             features: payload[1],
+            features2: payload.get(2).copied().unwrap_or(0),
         })
     }
 
     pub fn has(&self, feature_bit: u8) -> bool {
         self.features & feature_bit != 0
+    }
+
+    pub fn has2(&self, feature_bit: u8) -> bool {
+        self.features2 & feature_bit != 0
     }
 }
 
