@@ -107,15 +107,15 @@ enum Conn {
 struct Meter {
     samples: VecDeque<(Instant, usize)>,
     /// Strip arrivals per screen (0 top, 1 bottom): time + chunk index
-    /// (0 for unchunked full frames).
-    strips: [VecDeque<(Instant, u8)>; 2],
+    /// (0 for unchunked full frames) + sweep-start marker.
+    strips: [VecDeque<(Instant, u8, bool)>; 2],
 }
 
 impl Meter {
-    fn push(&mut self, bytes: usize, bottom: bool, chunk: Option<u8>) {
+    fn push(&mut self, bytes: usize, bottom: bool, chunk: Option<u8>, sweep_start: bool) {
         let now = Instant::now();
         self.samples.push_back((now, bytes));
-        self.strips[bottom as usize].push_back((now, chunk.unwrap_or(0)));
+        self.strips[bottom as usize].push_back((now, chunk.unwrap_or(0), sweep_start));
     }
 
     fn reset(&mut self) {
@@ -128,7 +128,7 @@ impl Meter {
             self.samples.pop_front();
         }
         for s in &mut self.strips {
-            while s.front().is_some_and(|(t, _)| *t < cutoff) {
+            while s.front().is_some_and(|(t, _, _)| *t < cutoff) {
                 s.pop_front();
             }
         }
@@ -141,13 +141,18 @@ impl Meter {
         (self.samples.len(), bytes as f32 * 8.0 / 1_000_000.0)
     }
 
-    /// Effective full-frame fps for a screen: strips/s divided by the
-    /// strips-per-frame inferred from the same window (max chunk index + 1;
-    /// 1 for unchunked streams). Tracks live chunk-count changes.
+    /// Sweeps per second for a screen: counts the sweep-start markers the
+    /// sysmodule stamps on each pass's first strip — honest across chunk
+    /// counts and dirty-rect updates. Falls back to the chunk-index
+    /// inference for streams without markers.
     fn fps(&mut self, bottom: bool) -> f32 {
         self.trim();
         let s = &self.strips[bottom as usize];
-        let per_frame = s.iter().map(|(_, c)| *c).max().unwrap_or(0) as f32 + 1.0;
+        let sweeps = s.iter().filter(|(_, _, m)| *m).count();
+        if sweeps > 0 {
+            return sweeps as f32;
+        }
+        let per_frame = s.iter().map(|(_, c, _)| *c).max().unwrap_or(0) as f32 + 1.0;
         s.len() as f32 / per_frame
     }
 }
@@ -345,8 +350,8 @@ impl App {
                         let _ = worker.cmds.send(Cmd::SetV2Enabled(true));
                     }
                 }
-                Event::Screen { bottom, image, bytes, chunk, rects } => {
-                    self.meter.push(bytes, bottom, chunk);
+                Event::Screen { bottom, image, bytes, chunk, rects, sweep_start } => {
+                    self.meter.push(bytes, bottom, chunk, sweep_start);
                     if !bottom && self.bench.is_some() {
                         self.last_top = Some(image.clone());
                     }

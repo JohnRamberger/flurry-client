@@ -51,6 +51,9 @@ pub enum Event {
         /// Screen-space rects updated by this packet (x, y, w, h) — feeds
         /// the client's update-overlay debug view.
         rects: Vec<[u16; 4]>,
+        /// This packet started a new sweep over the screen (v2 pass_flags
+        /// bit 0, or legacy strip 0) — the honest fps unit.
+        sweep_start: bool,
     },
     Stats(String),
     /// Non-fatal notice (3DS-side error text, unsupported format, ...).
@@ -385,6 +388,7 @@ fn read_loop(mut stream: TcpStream, emit: &dyn Fn(Event)) -> String {
                 bytes: v2::SFRAME_HEADER_LEN + payload.len(),
                 chunk,
                 rects,
+                sweep_start: sf.pass_flags & 1 != 0,
             });
             continue;
         }
@@ -439,6 +443,7 @@ fn read_loop(mut stream: TcpStream, emit: &dyn Fn(Event)) -> String {
                     bytes: legacy::HEADER_LEN + payload.len(),
                     chunk: img.chunk,
                     rects,
+                    sweep_start: img.chunk.unwrap_or(0) == 0,
                 });
             }
             pkt::META => match info.subtype {

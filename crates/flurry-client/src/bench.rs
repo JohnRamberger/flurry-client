@@ -86,6 +86,11 @@ pub fn plan_configs(depth: u8, current: Settings, caps: Option<Announce>) -> Vec
     base.fps_cap = 0;
     base.interlace = false;
     base.downscale = false;
+    // Canonical grid so the rows/cols variants below are meaningful even
+    // when the user's current settings already deviate (their actual
+    // settings are still measured as the baseline row).
+    base.grid_rows = 1;
+    base.grid_cols = 16;
 
     let mut plan: Vec<Settings> = Vec::new();
     let mut add = |mut f: Box<dyn FnMut(&mut Settings)>| {
