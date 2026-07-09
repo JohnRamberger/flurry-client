@@ -196,6 +196,12 @@ struct App {
     /// fading red boxes over the video.
     show_updates: bool,
     update_rects: VecDeque<(Instant, bool, [u16; 4])>,
+    /// Atomic present: upload a screen's texture only on a sweep marker
+    /// (frame complete), not per packet — kills paint-in-progress tearing.
+    atomic_present: bool,
+    /// Per-screen image held from the previous packet, presented when the
+    /// next sweep starts (0 top, 1 bottom).
+    atomic_prev: [Option<egui::ColorImage>; 2],
     /// Screenshot folder of the current/last benchmark run.
     bench_dir: Option<std::path::PathBuf>,
     /// Profile-settings modal.
@@ -273,6 +279,8 @@ impl App {
             bench_dir: None,
             show_updates: false,
             update_rects: VecDeque::new(),
+            atomic_present: true,
+            atomic_prev: [None, None],
             show_settings: false,
             settings_tab: SettingsTab::Picture,
         }
@@ -364,12 +372,22 @@ impl App {
                             self.update_rects.pop_front();
                         }
                     }
-                    // Coalesce: keep only the newest image per screen and
-                    // upload once after the drain. Uploading per event
-                    // queued dozens of full-texture deltas per UI frame —
-                    // wasted CPU and implicated in wgpu texture-validation
-                    // panics under load.
-                    if bottom {
+                    // Coalesce to the newest image per screen, uploaded once
+                    // after the drain (per-event upload panicked wgpu under
+                    // load). Atomic present defers further: hold this image
+                    // and only present the PREVIOUS one when a new sweep
+                    // starts — the presented frame is always a complete
+                    // sweep, never a half-painted one (no paint tearing).
+                    let s = bottom as usize;
+                    if self.atomic_present {
+                        if sweep_start {
+                            if let Some(prev) = self.atomic_prev[s].take() {
+                                if bottom { pending_bottom = Some(prev); }
+                                else { pending_top = Some(prev); }
+                            }
+                        }
+                        self.atomic_prev[s] = Some(image);
+                    } else if bottom {
                         pending_bottom = Some(image);
                     } else {
                         pending_top = Some(image);
@@ -405,6 +423,7 @@ impl App {
             self.conn = Conn::Idle;
             self.status = reason;
             self.bench = None; // benchmark cannot continue without a stream
+            self.atomic_prev = [None, None];
         }
     }
 
@@ -1207,6 +1226,13 @@ impl App {
             && !self.show_updates
         {
             self.update_rects.clear();
+        }
+        if ui
+            .checkbox(&mut self.atomic_present, "Atomic present (no tearing)")
+            .on_hover_text("Show only complete frames — removes strip-by-strip paint tearing, adds up to one sweep of latency.")
+            .changed()
+        {
+            self.atomic_prev = [None, None];
         }
         // Older sysmodules stream stats unconditionally; only show them
         // when wanted (the packets are still parsed for benchmarks).
