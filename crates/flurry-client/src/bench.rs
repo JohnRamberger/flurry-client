@@ -3,8 +3,12 @@
 //! for a user-chosen FPS↔Quality goal.
 //!
 //! Driven by `App` each frame: apply config → settle → measure → next.
-//! Always runs with BOTH screens streaming (the mostly-static bottom screen
-//! exercises strip skip; the fps goal is the combined rate). fps per config
+//! Always runs with BOTH screens streaming, but the fps goal is the TOP
+//! screen rate only: the moving top screen is the fluidity that matters,
+//! and cycles wasted redrawing the static bottom screen show up as lost
+//! top fps automatically (bottom fps is kept as a diagnostic — it should
+//! be near the forced-refresh rate; higher means strip skip is failing).
+//! fps per config
 //! is a trimmed mean of ~200 ms samples across the measure window, so a
 //! single hiccup or lucky burst doesn't decide the winner. The 3DS-side
 //! stats (enc/send ms/s, skip rate) captured at the end of each window go
@@ -54,10 +58,11 @@ enum Phase {
 pub struct Bench {
     opts: Options,
     plan: Vec<(Settings, f32)>, // config + fallback quality weight
-    results: Vec<(f32, StatsSnap, f32, f32)>, // fps, stats, sharpness, blockiness
+    results: Vec<(f32, f32, StatsSnap, f32, f32)>, // top fps, bottom fps, stats, sharpness, blockiness
     idx: usize,
     phase: Phase,
     samples: Vec<f32>,
+    bot_samples: Vec<f32>,
     qual_samples: Vec<(f32, f32)>,
     stats_samples: Vec<StatsSnap>,
     last_sample: Instant,
@@ -70,7 +75,11 @@ pub struct Bench {
 #[derive(Clone)]
 pub struct BenchResult {
     pub label: String,
+    /// Top-screen (moving content) fps — the score's fps input.
     pub fps: f32,
+    /// Bottom-screen fps — diagnostic; should be near the forced-refresh
+    /// rate on static content, higher means strip skip isn't working.
+    pub bot: f32,
     pub stats: StatsSnap,
     /// Measured no-reference sharpness (relative across the run).
     pub sharp: f32,
@@ -172,6 +181,7 @@ impl Bench {
             idx: 0,
             phase: Phase::Settle(Instant::now() + SETTLE),
             samples: Vec::new(),
+            bot_samples: Vec::new(),
             qual_samples: Vec::new(),
             stats_samples: Vec::new(),
             last_sample: Instant::now(),
@@ -210,15 +220,22 @@ impl Bench {
         format!("{} q={} chunks={}", mode_name(cfg), cfg.quality, cfg.chunks)
     }
 
-    /// Advance the state machine. `fps` = current combined fps reading,
-    /// `qual` = (sharpness, blockiness) of the latest decoded top frame,
-    /// `stats` = latest parsed 3DS stats. Returns the winning settings once
-    /// finished.
-    pub fn tick(&mut self, fps: f32, qual: (f32, f32), stats: StatsSnap) -> Option<Settings> {
+    /// Advance the state machine. `fps_top`/`fps_bot` = current per-screen
+    /// fps readings, `qual` = (sharpness, blockiness) of the latest decoded
+    /// top frame, `stats` = latest parsed 3DS stats. Returns the winning
+    /// settings once finished.
+    pub fn tick(
+        &mut self,
+        fps_top: f32,
+        fps_bot: f32,
+        qual: (f32, f32),
+        stats: StatsSnap,
+    ) -> Option<Settings> {
         match self.phase {
             Phase::Settle(until) => {
                 if Instant::now() >= until {
                     self.samples.clear();
+                    self.bot_samples.clear();
                     self.qual_samples.clear();
                     self.stats_samples.clear();
                     self.last_sample = Instant::now();
@@ -228,7 +245,8 @@ impl Bench {
             }
             Phase::Measure(until) => {
                 if self.last_sample.elapsed() >= SAMPLE_EVERY {
-                    self.samples.push(fps);
+                    self.samples.push(fps_top);
+                    self.bot_samples.push(fps_bot);
                     self.qual_samples.push(qual);
                     self.stats_samples.push(stats);
                     self.last_sample = Instant::now();
@@ -237,6 +255,7 @@ impl Bench {
                     return None;
                 }
                 let fps_avg = trimmed_mean(std::mem::take(&mut self.samples));
+                let bot_avg = trimmed_mean(std::mem::take(&mut self.bot_samples));
                 let qs = std::mem::take(&mut self.qual_samples);
                 let n = qs.len().max(1) as f32;
                 let sharp = qs.iter().map(|(s, _)| s).sum::<f32>() / n;
@@ -252,7 +271,7 @@ impl Bench {
                     sent: ss.iter().map(|s| s.sent).sum::<f32>() / sn,
                     skip: ss.iter().map(|s| s.skip).sum::<f32>() / sn,
                 };
-                self.results.push((fps_avg, stats_avg, sharp, block));
+                self.results.push((fps_avg, bot_avg, stats_avg, sharp, block));
                 self.idx += 1;
                 if self.idx < self.plan.len() {
                     self.phase = Phase::Settle(Instant::now() + SETTLE);
@@ -266,10 +285,10 @@ impl Bench {
                 let max_sharp = self
                     .results
                     .iter()
-                    .map(|(_, _, s, _)| *s)
+                    .map(|(_, _, _, s, _)| *s)
                     .fold(0.0f32, f32::max);
                 let quality_of = |i: usize| -> f32 {
-                    let (_, _, sharp, block) = self.results[i];
+                    let (_, _, _, sharp, block) = self.results[i];
                     if max_sharp > 0.01 {
                         (sharp / max_sharp - 0.15 * (block - 1.0).clamp(0.0, 2.0)).max(0.0)
                     } else {
@@ -278,7 +297,7 @@ impl Bench {
                 };
                 let mut best = 0usize;
                 let mut best_score = f32::MIN;
-                for (i, (fps, _, _, _)) in self.results.iter().enumerate() {
+                for (i, (fps, _, _, _, _)) in self.results.iter().enumerate() {
                     let score = (1.0 - g) * (fps / FPS_TARGET).min(1.0) + g * quality_of(i);
                     if score > best_score {
                         best_score = score;
@@ -288,7 +307,7 @@ impl Bench {
                 self.table = (0..self.plan.len())
                     .map(|i| {
                         let (cfg, _) = &self.plan[i];
-                        let (fps, stats, sharp, block) = self.results[i];
+                        let (fps, bot, stats, sharp, block) = self.results[i];
                         BenchResult {
                             label: format!(
                                 "{} q={} c={}",
@@ -297,6 +316,7 @@ impl Bench {
                                 cfg.chunks
                             ),
                             fps,
+                            bot,
                             stats,
                             sharp,
                             block,
@@ -315,7 +335,7 @@ impl Bench {
                 // The forced both-screens view was for measurement only.
                 win.screen = self.restore.screen;
                 self.summary = Some(format!(
-                    "Winner: {} q={} — {:.1} fps (score {:.2})",
+                    "Winner: {} q={} — {:.1} top fps (score {:.2})",
                     mode_name(&win),
                     win.quality,
                     self.results[best].0,

@@ -682,7 +682,8 @@ impl App {
                                 .min_col_width(56.0)
                                 .show(ui, |ui| {
                                     ui.strong("Config");
-                                    ui.strong("fps");
+                                    ui.strong("top fps");
+                                    ui.strong("bot fps");
                                     ui.strong("sharp");
                                     ui.strong("block");
                                     ui.strong("enc ms/s");
@@ -698,6 +699,7 @@ impl App {
                                         };
                                         ui.label(label);
                                         ui.label(format!("{:.1}", r.fps));
+                                        ui.label(format!("{:.1}", r.bot));
                                         ui.label(format!("{:.2}", r.sharp));
                                         ui.label(format!("{:.2}", r.block));
                                         ui.label(format!("{:.0}", r.stats.enc));
@@ -748,7 +750,8 @@ impl App {
     }
 
     fn bench_tick(&mut self, ctx: &egui::Context) {
-        let fps = self.meter.fps(false) + self.meter.fps(true);
+        let fps_top = self.meter.fps(false);
+        let fps_bot = self.meter.fps(true);
         let snap = self.stats_snap;
         let qual = self
             .last_top
@@ -759,7 +762,7 @@ impl App {
         // Keep the stream on the config under test.
         self.settings = b.current_config();
         let prev_step = b.step();
-        let finished = b.tick(fps, qual, snap);
+        let finished = b.tick(fps_top, fps_bot, qual, snap);
         // Config finished (advanced or run done): screenshot it.
         if b.step() != prev_step || finished.is_some() {
             if let (Some(img), Some(dir)) = (&self.last_top, &self.bench_dir) {
