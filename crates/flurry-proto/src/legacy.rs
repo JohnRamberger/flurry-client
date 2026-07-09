@@ -28,13 +28,24 @@ pub mod pkt {
     pub const META: u8 = 0xFF;
 }
 
-/// `SETTING` subtypes.
+/// `SETTING` subtypes. 0x06+ are Flurry extensions (PROTOCOL.md "Legacy
+/// extensions"); pre-extension sysmodules ignore them.
 pub mod setting {
     pub const QUALITY: u8 = 0x01; // u8 payload, 1–100
     pub const CPU_CAP: u8 = 0x02; // u8 payload; dummied out on the 3DS
     pub const SCREEN: u8 = 0x03; // u8 payload: 1 top, 2 bottom, 3 both
     pub const FORMAT: u8 = 0x04; // u8 payload: 0 JPEG, 1 TGA
     pub const INTERLACE: u8 = 0x05; // u8 payload: bool
+    pub const STRIP_SKIP: u8 = 0x06; // u8 payload: bool — skip unchanged strips
+    pub const REFRESH_INTERVAL: u8 = 0x07; // u8 payload: force-send every N frames (0 = never)
+    pub const FPS_CAP: u8 = 0x08; // u8 payload: target fps (0 = uncapped)
+}
+
+/// Feature bits carried by the [`meta::ANNOUNCE`] packet.
+pub mod feature {
+    pub const STRIP_SKIP: u8 = 1 << 0;
+    pub const FPS_CAP: u8 = 1 << 1;
+    pub const OLD3DS_INTERLACE: u8 = 1 << 2;
 }
 
 /// Legacy screen-select values (1-based, unlike v1).
@@ -78,6 +89,18 @@ pub fn encode_format_tga(tga: bool) -> Vec<u8> {
 
 pub fn encode_interlace(on: bool) -> Vec<u8> {
     packet(pkt::SETTING, setting::INTERLACE, &[on as u8])
+}
+
+pub fn encode_strip_skip(on: bool) -> Vec<u8> {
+    packet(pkt::SETTING, setting::STRIP_SKIP, &[on as u8])
+}
+
+pub fn encode_refresh_interval(frames: u8) -> Vec<u8> {
+    packet(pkt::SETTING, setting::REFRESH_INTERVAL, &[frames])
+}
+
+pub fn encode_fps_cap(fps: u8) -> Vec<u8> {
+    packet(pkt::SETTING, setting::FPS_CAP, &[fps])
 }
 
 /// Parsed legacy framing header.
@@ -150,6 +173,33 @@ impl ImageInfo {
 pub mod meta {
     pub const ERROR: u8 = 0x00;
     pub const STATS: u8 = 0x03;
+    /// Flurry extension: sent once on connect by extended sysmodules.
+    /// Payload: `[announce_rev: u8][feature bits: u8]` (see [`super::feature`]).
+    /// Absence within ~1 s of connecting means a pre-extension sysmodule.
+    pub const ANNOUNCE: u8 = 0x04;
+}
+
+/// Parsed [`meta::ANNOUNCE`] payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Announce {
+    pub revision: u8,
+    pub features: u8,
+}
+
+impl Announce {
+    pub fn parse(payload: &[u8]) -> Result<Announce> {
+        if payload.len() < 2 {
+            return Err(Error::Truncated);
+        }
+        Ok(Announce {
+            revision: payload[0],
+            features: payload[1],
+        })
+    }
+
+    pub fn has(&self, feature_bit: u8) -> bool {
+        self.features & feature_bit != 0
+    }
 }
 
 #[cfg(test)]
@@ -200,6 +250,25 @@ mod tests {
         let img = ImageInfo::from_packet(&info);
         assert!(!img.bottom && img.tga);
         assert_eq!(img.chunk, Some(5));
+    }
+
+    #[test]
+    fn extension_packets_and_announce() {
+        assert_eq!(
+            encode_strip_skip(true),
+            vec![0x04, 0x06, 0, 0, 1, 0, 0, 0, 1]
+        );
+        assert_eq!(
+            encode_refresh_interval(64),
+            vec![0x04, 0x07, 0, 0, 1, 0, 0, 0, 64]
+        );
+        assert_eq!(encode_fps_cap(30), vec![0x04, 0x08, 0, 0, 1, 0, 0, 0, 30]);
+
+        let a = Announce::parse(&[1, feature::STRIP_SKIP | feature::FPS_CAP]).unwrap();
+        assert_eq!(a.revision, 1);
+        assert!(a.has(feature::STRIP_SKIP) && a.has(feature::FPS_CAP));
+        assert!(!a.has(feature::OLD3DS_INTERLACE));
+        assert_eq!(Announce::parse(&[1]).unwrap_err(), Error::Truncated);
     }
 
     #[test]

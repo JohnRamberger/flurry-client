@@ -21,14 +21,24 @@ pub enum Cmd {
     SetQuality(u8),
     SetScreen(ScreenSet),
     SetInterlace(bool),
+    SetStripSkip(bool),
+    SetRefreshInterval(u8),
+    SetFpsCap(u8),
     Disconnect,
 }
 
 /// Worker → UI.
 pub enum Event {
     Connected,
-    /// A screen buffer changed. `bottom` selects which texture to update.
-    Screen { bottom: bool, image: egui::ColorImage },
+    /// Extended sysmodule announced its feature set.
+    Capabilities(legacy::Announce),
+    /// A screen buffer changed. `bottom` selects which texture to update;
+    /// `bytes` is the wire size of the packet (for the bandwidth meter).
+    Screen {
+        bottom: bool,
+        image: egui::ColorImage,
+        bytes: usize,
+    },
     Stats(String),
     /// Non-fatal notice (3DS-side error text, unsupported format, ...).
     Info(String),
@@ -96,6 +106,9 @@ pub fn spawn(addr: String, ctx: egui::Context, quality: u8, screen: ScreenSet, i
                     Cmd::SetQuality(q) => (legacy::encode_quality(q), false),
                     Cmd::SetScreen(s) => (legacy::encode_screen(s), false),
                     Cmd::SetInterlace(i) => (legacy::encode_interlace(i), false),
+                    Cmd::SetStripSkip(s) => (legacy::encode_strip_skip(s), false),
+                    Cmd::SetRefreshInterval(n) => (legacy::encode_refresh_interval(n), false),
+                    Cmd::SetFpsCap(f) => (legacy::encode_fps_cap(f), false),
                     Cmd::Disconnect => (legacy::encode_disconnect(), true),
                 };
                 let _ = wr.write_all(&bytes);
@@ -226,15 +239,23 @@ fn read_loop(mut stream: TcpStream, emit: &dyn Fn(Event)) -> String {
                 emit(Event::Screen {
                     bottom: img.bottom,
                     image: buf.image.clone(),
+                    bytes: legacy::HEADER_LEN + payload.len(),
                 });
             }
-            pkt::META => {
-                let text = String::from_utf8_lossy(&payload).into_owned();
-                match info.subtype {
-                    legacy::meta::STATS => emit(Event::Stats(text)),
-                    _ => emit(Event::Info(format!("3DS: {text}"))),
+            pkt::META => match info.subtype {
+                legacy::meta::STATS => {
+                    emit(Event::Stats(String::from_utf8_lossy(&payload).into_owned()))
                 }
-            }
+                legacy::meta::ANNOUNCE => {
+                    if let Ok(a) = legacy::Announce::parse(&payload) {
+                        emit(Event::Capabilities(a));
+                    }
+                }
+                _ => emit(Event::Info(format!(
+                    "3DS: {}",
+                    String::from_utf8_lossy(&payload)
+                ))),
+            },
             // Unknown packet types: payload already consumed, skip.
             _ => {}
         }
