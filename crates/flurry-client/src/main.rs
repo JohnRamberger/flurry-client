@@ -211,6 +211,17 @@ struct App {
     update_rects: VecDeque<(Instant, bool, [u16; 4])>,
     /// Screenshot folder of the current/last benchmark run.
     bench_dir: Option<std::path::PathBuf>,
+    /// Profile-settings modal.
+    show_settings: bool,
+    settings_tab: SettingsTab,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettingsTab {
+    Picture,
+    Performance,
+    Detection,
+    Debug,
 }
 
 /// Parse the sysmodule's key=value stats text.
@@ -271,6 +282,8 @@ impl App {
             bench_dir: None,
             show_updates: false,
             update_rects: VecDeque::new(),
+            show_settings: false,
+            settings_tab: SettingsTab::Picture,
         }
     }
 
@@ -873,6 +886,148 @@ impl App {
         }
     }
 
+    /// Profile-settings modal: every stream knob, grouped in tabs with a
+    /// plain-language description under each control.
+    fn settings_window(&mut self, ctx: &egui::Context) {
+        if !self.show_settings {
+            return;
+        }
+        let mut open = true;
+        let caps = self.caps();
+        let idle = matches!(self.conn, Conn::Idle);
+        let ok = |bit: u8| caps.is_some_and(|a| a.has(bit)) || idle;
+        let ok2 = |bit: u8| caps.is_some_and(|a| a.has2(bit)) || idle;
+        let title = format!(
+            "Profile settings — {}",
+            self.device.profile.as_deref().unwrap_or("(unsaved)")
+        );
+
+        fn knob(ui: &mut egui::Ui, enabled: bool, desc: &str, add: impl FnOnce(&mut egui::Ui)) {
+            ui.add_enabled_ui(enabled, |ui| {
+                add(ui);
+                ui.small(desc);
+                if !enabled {
+                    ui.small("⚠ needs a newer Flurry sysmodule");
+                }
+            });
+            ui.add_space(8.0);
+        }
+
+        egui::Window::new(title)
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(380.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    for (tab, label) in [
+                        (SettingsTab::Picture, "Picture"),
+                        (SettingsTab::Performance, "Performance"),
+                        (SettingsTab::Detection, "Change detection"),
+                        (SettingsTab::Debug, "Debug"),
+                    ] {
+                        ui.selectable_value(&mut self.settings_tab, tab, label);
+                    }
+                });
+                ui.separator();
+
+                let s = &mut self.settings;
+                let before = *s;
+                match self.settings_tab {
+                    SettingsTab::Picture => {
+                        knob(ui, true, "Sharpness of the JPEG stream. Costs almost no 3DS CPU — mainly trades bandwidth for detail.", |ui| {
+                            ui.add(egui::Slider::new(&mut s.quality, 1..=100).text("JPEG quality"));
+                        });
+                        let mut mode = if s.downscale { 2 } else if s.interlace { 1 } else { 0 };
+                        knob(ui, ok(feature::DOWNSCALE) || mode != 2, "Resolution vs speed. Full ≈ 5-6 fps; Interlace halves vertical detail per update (~+40% fps); Quarter-res upscales 2×2 (~2× fps, softest).", |ui| {
+                            ui.label("Mode");
+                            ui.radio_value(&mut mode, 0, "Full resolution");
+                            ui.radio_value(&mut mode, 1, "Interlace");
+                            ui.radio_value(&mut mode, 2, "Quarter-res");
+                        });
+                        s.interlace = mode == 1;
+                        s.downscale = mode == 2;
+                    }
+                    SettingsTab::Performance => {
+                        knob(ui, ok(feature::CHUNKS), "Vertical strips each screen is captured in. 4 measured ~40% faster than 8 (fewer packets, less per-strip overhead).", |ui| {
+                            egui::ComboBox::from_label("Chunks per screen")
+                                .selected_text(format!("{}", s.chunks))
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut s.chunks, 4u8, "4 (recommended)");
+                                    ui.selectable_value(&mut s.chunks, 8u8, "8 (legacy)");
+                                });
+                        });
+                        knob(ui, ok(feature::STRIP_SLEEP), "Pause between strips. 0 = fastest; raise a little if the console's WiFi or games get unstable while streaming.", |ui| {
+                            ui.add(egui::Slider::new(&mut s.strip_sleep, 0..=20).text("Strip sleep (ms)"));
+                        });
+                        knob(ui, ok(feature::FPS_CAP), "Limits the capture rate, freeing 3DS CPU. 0 = uncapped.", |ui| {
+                            ui.add(egui::Slider::new(&mut s.fps_cap, 0..=60).text("FPS cap"));
+                        });
+                    }
+                    SettingsTab::Detection => {
+                        knob(ui, ok(feature::STRIP_SKIP), "Checks each strip for changes and skips unchanged ones. Huge win on menus / static screens — leave on.", |ui| {
+                            ui.checkbox(&mut s.strip_skip, "Skip unchanged content");
+                        });
+                        knob(ui, ok(feature::STRIP_SKIP), "Force-resend a strip after this many passes even if unchanged — heals any missed update. Lower = fresher, higher = fewer redundant sends. 0 disables.", |ui| {
+                            ui.add(egui::Slider::new(&mut s.refresh_interval, 0..=255).text("Refresh interval"));
+                        });
+                        knob(ui, ok2(feature2::CELL_SIZE), "Granularity of change detection (protocol v2). Finer cells send tighter update boxes but do more bookkeeping. Watch the effect live with the update overlay (Debug tab).", |ui| {
+                            egui::ComboBox::from_label("Dirty-cell size")
+                                .selected_text(match s.cell_size {
+                                    1 => "Fine (5×30)",
+                                    2 => "Coarse (25×120)",
+                                    _ => "Default (10×60)",
+                                })
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut s.cell_size, 0u8, "Default (10×60)");
+                                    ui.selectable_value(&mut s.cell_size, 1u8, "Fine (5×30)");
+                                    ui.selectable_value(&mut s.cell_size, 2u8, "Coarse (25×120)");
+                                });
+                        });
+                    }
+                    SettingsTab::Debug => {}
+                }
+                if *s != before {
+                    s.custom = true;
+                }
+
+                if self.settings_tab == SettingsTab::Debug {
+                    if ui
+                        .checkbox(&mut self.debug_stats, "3DS perf stats")
+                        .changed()
+                    {
+                        self.send_stats_enabled(self.debug_stats);
+                        if !self.debug_stats {
+                            self.stats.clear();
+                        }
+                    }
+                    ui.small("Streams a 1 Hz report from the console: encode/send time, skipped and torn strips. Shown in the left panel.");
+                    ui.add_space(8.0);
+                    if ui
+                        .checkbox(&mut self.show_updates, "Update overlay")
+                        .changed()
+                        && !self.show_updates
+                    {
+                        self.update_rects.clear();
+                    }
+                    ui.small("Draws fading red boxes over screen regions as they update — makes skip behavior and dirty-rect sizes visible.");
+                }
+
+                ui.separator();
+                if let Some(name) = self.device.profile.clone() {
+                    if ui.button(format!("💾 Save to profile '{name}'")).clicked() {
+                        self.store.upsert_profile(Profile {
+                            name,
+                            settings: self.settings,
+                        });
+                    }
+                } else {
+                    ui.small("Tip: save these as a named profile from the 📼 menu in the toolbar.");
+                }
+            });
+        self.show_settings = open;
+    }
+
     fn controls_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("Stream");
         let master = ui.add(
@@ -898,100 +1053,15 @@ impl App {
             });
         self.settings.screen = screen;
 
-        let caps = self.caps();
-        egui::CollapsingHeader::new("Advanced").show(ui, |ui| {
-            let s = &mut self.settings;
-            let before = *s;
-            ui.add(egui::Slider::new(&mut s.quality, 1..=100).text("JPEG quality"));
-            ui.checkbox(&mut s.interlace, "Interlace");
-
-            let ext = |on: bool| {
-                if on {
-                    ""
-                } else {
-                    " (needs extended sysmodule)"
-                }
-            };
-            let idle = matches!(self.conn, Conn::Idle);
-            let skip_ok = caps.is_some_and(|a| a.has(feature::STRIP_SKIP));
-            ui.add_enabled_ui(skip_ok || idle, |ui| {
-                ui.checkbox(&mut s.strip_skip, format!("Skip unchanged strips{}", ext(skip_ok)));
-                ui.add(
-                    egui::Slider::new(&mut s.refresh_interval, 0..=255)
-                        .text(format!("Refresh interval{}", ext(skip_ok))),
-                );
-            });
-            let cap_ok = caps.is_some_and(|a| a.has(feature::FPS_CAP));
-            ui.add_enabled_ui(cap_ok || idle, |ui| {
-                ui.add(
-                    egui::Slider::new(&mut s.fps_cap, 0..=60)
-                        .text(format!("FPS cap (0 = off){}", ext(cap_ok))),
-                );
-            });
-            let chunks_ok = caps.is_some_and(|a| a.has(feature::CHUNKS));
-            ui.add_enabled_ui(chunks_ok || idle, |ui| {
-                egui::ComboBox::from_label(format!("Chunks (Old 3DS){}", ext(chunks_ok)))
-                    .selected_text(format!("{}", s.chunks))
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut s.chunks, 8u8, "8");
-                        ui.selectable_value(&mut s.chunks, 4u8, "4");
-                        ui.selectable_value(&mut s.chunks, 2u8, "2");
-                    });
-            });
-            let sleep_ok = caps.is_some_and(|a| a.has(feature::STRIP_SLEEP));
-            ui.add_enabled_ui(sleep_ok || idle, |ui| {
-                ui.add(
-                    egui::Slider::new(&mut s.strip_sleep, 0..=20)
-                        .text(format!("Strip sleep ms{}", ext(sleep_ok))),
-                );
-            });
-            let ds_ok = caps.is_some_and(|a| a.has(feature::DOWNSCALE));
-            ui.add_enabled_ui(ds_ok || idle, |ui| {
-                ui.checkbox(
-                    &mut s.downscale,
-                    format!("Quarter-res (~4x faster){}", ext(ds_ok)),
-                );
-            });
-            let cell_ok = caps.is_some_and(|a| a.has2(feature2::CELL_SIZE));
-            ui.add_enabled_ui(cell_ok || idle, |ui| {
-                egui::ComboBox::from_label(format!("Dirty cells{}", ext(cell_ok)))
-                    .selected_text(match s.cell_size {
-                        1 => "Fine (5x30)",
-                        2 => "Coarse (25x120)",
-                        _ => "Default (10x60)",
-                    })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut s.cell_size, 0u8, "Default (10x60)");
-                        ui.selectable_value(&mut s.cell_size, 1u8, "Fine (5x30)");
-                        ui.selectable_value(&mut s.cell_size, 2u8, "Coarse (25x120)");
-                    });
-            });
-            if *s != before {
-                s.custom = true;
-            }
-        });
+        if ui.button("⚙ Profile settings…").clicked() {
+            self.show_settings = true;
+        }
 
         let (ups, mbps) = self.meter.rates();
         let (fps_top, fps_bot) = (self.meter.fps(false), self.meter.fps(true));
         ui.separator();
         ui.strong(format!("Top {fps_top:.1} fps   Bottom {fps_bot:.1} fps"));
         ui.label(format!("{ups} strips/s   {mbps:.2} Mbit/s"));
-        if ui
-            .checkbox(&mut self.debug_stats, "Debug (3DS perf stats)")
-            .changed()
-        {
-            self.send_stats_enabled(self.debug_stats);
-            if !self.debug_stats {
-                self.stats.clear();
-            }
-        }
-        if ui
-            .checkbox(&mut self.show_updates, "Show updates (overlay)")
-            .changed()
-            && !self.show_updates
-        {
-            self.update_rects.clear();
-        }
         // Older sysmodules stream stats unconditionally; only show them
         // when wanted (the packets are still parsed for benchmarks).
         if self.debug_stats && !self.stats.is_empty() {
@@ -1037,6 +1107,7 @@ impl eframe::App for App {
 
         self.push_settings();
         self.device_editor_window(&ctx);
+        self.settings_window(&ctx);
         self.bench_window(&ctx);
 
         egui::CentralPanel::default().show(ui, |ui| {
