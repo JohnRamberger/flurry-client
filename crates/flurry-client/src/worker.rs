@@ -24,6 +24,8 @@ pub enum Cmd {
     SetStripSkip(bool),
     SetRefreshInterval(u8),
     SetFpsCap(u8),
+    SetChunks(u8),
+    SetStripSleep(u8),
     Disconnect,
 }
 
@@ -109,6 +111,8 @@ pub fn spawn(addr: String, ctx: egui::Context, quality: u8, screen: ScreenSet, i
                     Cmd::SetStripSkip(s) => (legacy::encode_strip_skip(s), false),
                     Cmd::SetRefreshInterval(n) => (legacy::encode_refresh_interval(n), false),
                     Cmd::SetFpsCap(f) => (legacy::encode_fps_cap(f), false),
+                    Cmd::SetChunks(c) => (legacy::encode_chunks(c), false),
+                    Cmd::SetStripSleep(ms) => (legacy::encode_strip_sleep(ms), false),
                     Cmd::Disconnect => (legacy::encode_disconnect(), true),
                 };
                 let _ = wr.write_all(&bytes);

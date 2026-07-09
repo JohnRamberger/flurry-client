@@ -39,6 +39,8 @@ pub mod setting {
     pub const STRIP_SKIP: u8 = 0x06; // u8 payload: bool — skip unchanged strips
     pub const REFRESH_INTERVAL: u8 = 0x07; // u8 payload: force-send every N frames (0 = never)
     pub const FPS_CAP: u8 = 0x08; // u8 payload: target fps (0 = uncapped)
+    pub const CHUNKS: u8 = 0x09; // u8 payload: strips per screen on Old 3DS (2, 4 or 8)
+    pub const STRIP_SLEEP: u8 = 0x0A; // u8 payload: ms pause between strips (0-20)
 }
 
 /// Feature bits carried by the [`meta::ANNOUNCE`] packet.
@@ -46,6 +48,8 @@ pub mod feature {
     pub const STRIP_SKIP: u8 = 1 << 0;
     pub const FPS_CAP: u8 = 1 << 1;
     pub const OLD3DS_INTERLACE: u8 = 1 << 2;
+    pub const CHUNKS: u8 = 1 << 3;
+    pub const STRIP_SLEEP: u8 = 1 << 4;
 }
 
 /// Legacy screen-select values (1-based, unlike v1).
@@ -101,6 +105,14 @@ pub fn encode_refresh_interval(frames: u8) -> Vec<u8> {
 
 pub fn encode_fps_cap(fps: u8) -> Vec<u8> {
     packet(pkt::SETTING, setting::FPS_CAP, &[fps])
+}
+
+pub fn encode_chunks(chunks: u8) -> Vec<u8> {
+    packet(pkt::SETTING, setting::CHUNKS, &[chunks])
+}
+
+pub fn encode_strip_sleep(ms: u8) -> Vec<u8> {
+    packet(pkt::SETTING, setting::STRIP_SLEEP, &[ms])
 }
 
 /// Parsed legacy framing header.

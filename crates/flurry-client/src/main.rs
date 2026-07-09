@@ -34,6 +34,7 @@ fn main() -> eframe::Result {
 /// All tunable stream settings. Serialized into profiles, diffed against the
 /// last values sent to the worker so edits apply live.
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Settings {
     /// Master quality↔FPS balance, 0.0 = max FPS … 1.0 = max quality.
     /// Drives the knobs below unless `custom`.
@@ -49,6 +50,10 @@ pub struct Settings {
     pub refresh_interval: u8,
     /// Target fps, 0 = uncapped. Extension knob.
     pub fps_cap: u8,
+    /// Strips per screen on Old 3DS (8 default, 4 or 2). Extension knob.
+    pub chunks: u8,
+    /// Pause between strips in ms (Old 3DS pacing floor). Extension knob.
+    pub strip_sleep: u8,
 }
 
 impl Default for Settings {
@@ -62,6 +67,8 @@ impl Default for Settings {
             strip_skip: true,
             refresh_interval: 64,
             fps_cap: 0,
+            chunks: 8,
+            strip_sleep: 5,
         };
         s.apply_master();
         s
@@ -250,6 +257,12 @@ impl App {
             if a.has(feature::FPS_CAP) && sent.fps_cap != s.fps_cap {
                 let _ = worker.cmds.send(Cmd::SetFpsCap(s.fps_cap));
             }
+            if a.has(feature::CHUNKS) && sent.chunks != s.chunks {
+                let _ = worker.cmds.send(Cmd::SetChunks(s.chunks));
+            }
+            if a.has(feature::STRIP_SLEEP) && sent.strip_sleep != s.strip_sleep {
+                let _ = worker.cmds.send(Cmd::SetStripSleep(s.strip_sleep));
+            }
         }
         *sent = self.settings;
     }
@@ -379,6 +392,23 @@ impl App {
                 ui.add(
                     egui::Slider::new(&mut s.fps_cap, 0..=60)
                         .text(format!("FPS cap (0 = off){}", ext(cap_ok))),
+                );
+            });
+            let chunks_ok = caps.is_some_and(|a| a.has(feature::CHUNKS));
+            ui.add_enabled_ui(chunks_ok || matches!(self.conn, Conn::Idle), |ui| {
+                egui::ComboBox::from_label(format!("Chunks (Old 3DS){}", ext(chunks_ok)))
+                    .selected_text(format!("{}", s.chunks))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut s.chunks, 8u8, "8");
+                        ui.selectable_value(&mut s.chunks, 4u8, "4");
+                        ui.selectable_value(&mut s.chunks, 2u8, "2");
+                    });
+            });
+            let sleep_ok = caps.is_some_and(|a| a.has(feature::STRIP_SLEEP));
+            ui.add_enabled_ui(sleep_ok || matches!(self.conn, Conn::Idle), |ui| {
+                ui.add(
+                    egui::Slider::new(&mut s.strip_sleep, 0..=20)
+                        .text(format!("Strip sleep ms{}", ext(sleep_ok))),
                 );
             });
             if *s != before {
