@@ -54,8 +54,10 @@ pub struct Settings {
     pub strip_sleep: u8,
     /// Quarter-res mode (Old 3DS): ~4x encode speedup, 2x2 upscale. Extension knob.
     pub downscale: bool,
-    /// Dirty-cell preset: 0 = 10x60 (default), 1 = fine 5x30, 2 = coarse 25x120.
-    pub cell_size: u8,
+    /// Dirty-grid columns per screen (4/8/16). Column cuts are free.
+    pub grid_cols: u8,
+    /// Dirty-grid rows per screen (1/2/4/8). Row cuts multiply crc calls.
+    pub grid_rows: u8,
 }
 
 impl Default for Settings {
@@ -72,7 +74,8 @@ impl Default for Settings {
             chunks: 4,
             strip_sleep: 0,
             downscale: false,
-            cell_size: 0,
+            grid_cols: 16,
+            grid_rows: 1,
         }
     }
 }
@@ -435,9 +438,15 @@ impl App {
                 let _ = worker.cmds.send(Cmd::SetDownscale(s.downscale));
                 sent.downscale = s.downscale;
             }
-            if a.has2(feature2::CELL_SIZE) && sent.cell_size != s.cell_size {
-                let _ = worker.cmds.send(Cmd::SetCellSize(s.cell_size));
-                sent.cell_size = s.cell_size;
+            if a.has2(feature2::CELL_GRID) {
+                if sent.grid_cols != s.grid_cols {
+                    let _ = worker.cmds.send(Cmd::SetGridCols(s.grid_cols));
+                    sent.grid_cols = s.grid_cols;
+                }
+                if sent.grid_rows != s.grid_rows {
+                    let _ = worker.cmds.send(Cmd::SetGridRows(s.grid_rows));
+                    sent.grid_rows = s.grid_rows;
+                }
             }
         }
     }
@@ -473,7 +482,8 @@ impl App {
             chunks: 8,
             strip_sleep: 5,
             downscale: false,
-            cell_size: 0,
+            grid_cols: 16,
+            grid_rows: 1,
             ..self.settings
         };
         self.conn = Conn::Active {
@@ -962,17 +972,23 @@ impl App {
                         knob(ui, ok(feature::STRIP_SKIP), "Force-resend a strip after this many passes even if unchanged — heals any missed update. Lower = fresher, higher = fewer redundant sends. 0 disables.", |ui| {
                             ui.add(egui::Slider::new(&mut s.refresh_interval, 0..=255).text("Refresh interval"));
                         });
-                        knob(ui, ok2(feature2::CELL_SIZE), "Granularity of change detection (protocol v2). Finer cells send tighter update boxes but do more bookkeeping. Watch the effect live with the update overlay (Debug tab).", |ui| {
-                            egui::ComboBox::from_label("Dirty-cell size")
-                                .selected_text(match s.cell_size {
-                                    1 => "Fine (5×30)",
-                                    2 => "Coarse (25×120)",
-                                    _ => "Default (10×60)",
-                                })
+                        knob(ui, ok2(feature2::CELL_GRID), "How many columns the change-detection grid has per screen. More columns = update boxes hug motion tighter horizontally, at no CPU cost.", |ui| {
+                            egui::ComboBox::from_label("Grid columns")
+                                .selected_text(format!("{}", s.grid_cols))
                                 .show_ui(ui, |ui| {
-                                    ui.selectable_value(&mut s.cell_size, 0u8, "Default (10×60)");
-                                    ui.selectable_value(&mut s.cell_size, 1u8, "Fine (5×30)");
-                                    ui.selectable_value(&mut s.cell_size, 2u8, "Coarse (25×120)");
+                                    ui.selectable_value(&mut s.grid_cols, 4u8, "4");
+                                    ui.selectable_value(&mut s.grid_cols, 8u8, "8");
+                                    ui.selectable_value(&mut s.grid_cols, 16u8, "16 (recommended)");
+                                });
+                        });
+                        knob(ui, ok2(feature2::CELL_GRID), "Rows in the change-detection grid. 1 = full-height columns (cheapest). More rows localize changes vertically but multiply checksum work on the 3DS.", |ui| {
+                            egui::ComboBox::from_label("Grid rows")
+                                .selected_text(format!("{}", s.grid_rows))
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut s.grid_rows, 1u8, "1 (recommended)");
+                                    ui.selectable_value(&mut s.grid_rows, 2u8, "2");
+                                    ui.selectable_value(&mut s.grid_rows, 4u8, "4");
+                                    ui.selectable_value(&mut s.grid_rows, 8u8, "8");
                                 });
                         });
                     }

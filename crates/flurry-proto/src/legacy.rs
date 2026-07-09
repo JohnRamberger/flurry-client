@@ -44,12 +44,14 @@ pub mod setting {
     pub const DOWNSCALE: u8 = 0x0B; // u8 payload: bool — quarter-res mode (Old 3DS)
     pub const STATS_ENABLE: u8 = 0x0C; // u8 payload: bool — 1 Hz perf stats packets
     pub const V2_ENABLE: u8 = 0x0F; // u8 payload: bool — switch to protocol v2 framing
-    pub const CELL_SIZE: u8 = 0x10; // u8 payload: dirty-cell preset (0=10x60, 1=5x30, 2=25x120)
+    pub const GRID_COLS: u8 = 0x10; // u8 payload: dirty-grid columns per screen (4/8/16)
+    pub const GRID_ROWS: u8 = 0x11; // u8 payload: dirty-grid rows per screen (1/2/4/8)
 }
 
 /// Second feature byte (announce payload byte 2; absent on older builds).
 pub mod feature2 {
-    pub const CELL_SIZE: u8 = 1 << 0;
+    /// Dirty-grid geometry settings (GRID_COLS / GRID_ROWS).
+    pub const CELL_GRID: u8 = 1 << 0;
 }
 
 /// Feature bits carried by the [`meta::ANNOUNCE`] packet.
@@ -72,8 +74,12 @@ pub fn encode_v2_enable(on: bool) -> Vec<u8> {
     packet(pkt::SETTING, setting::V2_ENABLE, &[on as u8])
 }
 
-pub fn encode_cell_size(preset: u8) -> Vec<u8> {
-    packet(pkt::SETTING, setting::CELL_SIZE, &[preset])
+pub fn encode_grid_cols(cols: u8) -> Vec<u8> {
+    packet(pkt::SETTING, setting::GRID_COLS, &[cols])
+}
+
+pub fn encode_grid_rows(rows: u8) -> Vec<u8> {
+    packet(pkt::SETTING, setting::GRID_ROWS, &[rows])
 }
 
 /// Legacy screen-select values (1-based, unlike v1).
