@@ -139,6 +139,8 @@ struct App {
     /// Profile name field (doubles as "save as" input).
     profile_name: String,
     meter: Meter,
+    /// Recent 3DS-side notices (capture telemetry, errors) — newest last.
+    log: VecDeque<String>,
 }
 
 impl App {
@@ -155,6 +157,7 @@ impl App {
             profile_name: String::new(),
             store,
             meter: Meter::default(),
+            log: VecDeque::new(),
         };
         if let Some(name) = app.store.last.clone() {
             app.load_profile(&name);
@@ -200,7 +203,13 @@ impl App {
                     }
                 }
                 Event::Stats(s) => self.stats = s,
-                Event::Info(msg) => self.status = msg,
+                Event::Info(msg) => {
+                    self.log.push_back(msg.clone());
+                    while self.log.len() > 8 {
+                        self.log.pop_front();
+                    }
+                    self.status = msg;
+                }
                 Event::Disconnected(reason) => disconnect_reason = Some(reason),
             }
         }
@@ -384,6 +393,15 @@ impl App {
             egui::CollapsingHeader::new("3DS stats").show(ui, |ui| {
                 ui.label(&self.stats);
             });
+        }
+        if !self.log.is_empty() {
+            egui::CollapsingHeader::new("3DS log")
+                .default_open(true)
+                .show(ui, |ui| {
+                    for line in &self.log {
+                        ui.small(line);
+                    }
+                });
         }
     }
 }
