@@ -207,6 +207,8 @@ struct App {
     /// Profile-settings modal.
     show_settings: bool,
     settings_tab: SettingsTab,
+    show_log: bool,
+    log_tail: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -283,6 +285,8 @@ impl App {
             atomic_prev: [None, None],
             show_settings: false,
             settings_tab: SettingsTab::Picture,
+            show_log: false,
+            log_tail: true,
         }
     }
 
@@ -399,7 +403,7 @@ impl App {
                 }
                 Event::Info(msg) => {
                     self.log.push_back(msg.clone());
-                    while self.log.len() > 8 {
+                    while self.log.len() > 2000 {
                         self.log.pop_front();
                     }
                     self.status = msg;
@@ -1252,13 +1256,49 @@ impl App {
                     ui.label(&self.stats);
                 });
         }
-        if !self.log.is_empty() {
-            egui::CollapsingHeader::new("3DS log").show(ui, |ui| {
-                for line in &self.log {
-                    ui.small(line);
-                }
-            });
+        if ui
+            .button(format!("3DS log ({}) ⤢", self.log.len()))
+            .clicked()
+        {
+            self.show_log = !self.show_log;
         }
+    }
+
+    /// Full scrollable 3DS log as a bottom panel: tail (auto-scroll),
+    /// clear, copy-all.
+    fn log_panel(&mut self, ui: &mut egui::Ui) {
+        if !self.show_log {
+            return;
+        }
+        egui::Panel::bottom(egui::Id::new("log_panel"))
+            .resizable(true)
+            .default_size(220.0)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.heading("3DS log");
+                    ui.label(format!("({} lines)", self.log.len()));
+                    ui.checkbox(&mut self.log_tail, "Tail");
+                    if ui.button("Clear").clicked() {
+                        self.log.clear();
+                    }
+                    if ui.button("Copy all").clicked() {
+                        let all: String = self.log.iter().cloned().collect::<Vec<_>>().join("\n");
+                        ui.ctx().copy_text(all);
+                    }
+                    if ui.button("Close").clicked() {
+                        self.show_log = false;
+                    }
+                });
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .stick_to_bottom(self.log_tail)
+                    .show(ui, |ui| {
+                        for line in &self.log {
+                            ui.label(egui::RichText::new(line).monospace().small());
+                        }
+                    });
+            });
     }
 }
 
@@ -1275,6 +1315,8 @@ impl eframe::App for App {
         egui::Panel::bottom(egui::Id::new("statusbar")).show(ui, |ui| {
             ui.small(&self.status);
         });
+
+        self.log_panel(ui);
 
         egui::Panel::left(egui::Id::new("controls"))
             .resizable(false)
