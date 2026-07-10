@@ -58,6 +58,8 @@ pub struct Settings {
     pub grid_cols: u8,
     /// Dirty-grid rows per screen (1/2/4/8). Row cuts multiply crc calls.
     pub grid_rows: u8,
+    /// Capture backend: 0 = inter-process DMA, 1 = GPU display-transfer.
+    pub capture: u8,
 }
 
 impl Default for Settings {
@@ -76,6 +78,7 @@ impl Default for Settings {
             downscale: false,
             grid_cols: 16,
             grid_rows: 1,
+            capture: 0,
         }
     }
 }
@@ -350,6 +353,7 @@ impl App {
                     sent.downscale = false;
                     sent.grid_cols = 16;
                     sent.grid_rows = 1;
+                    sent.capture = 0;
                     // Stats are opt-in on toggle-capable sysmodules; enable
                     // them if the user wants debug info or a bench is live.
                     if a.has(feature::STATS_TOGGLE)
@@ -495,6 +499,10 @@ impl App {
                     sent.grid_rows = s.grid_rows;
                 }
             }
+            if a.has2(feature2::CAPTURE) && sent.capture != s.capture {
+                let _ = worker.cmds.send(Cmd::SetCapture(s.capture));
+                sent.capture = s.capture;
+            }
         }
     }
 
@@ -531,6 +539,7 @@ impl App {
             downscale: false,
             grid_cols: 16,
             grid_rows: 1,
+            capture: 0,
             ..self.settings
         };
         self.conn = Conn::Active {
@@ -1146,6 +1155,17 @@ impl App {
                         });
                         knob(ui, ok(feature::STRIP_SLEEP), "Pause between strips. 0 = fastest; raise a little if the console's WiFi or games get unstable while streaming.", |ui| {
                             ui.add(egui::Slider::new(&mut s.strip_sleep, 0..=20).text("Strip sleep (ms)"));
+                        });
+                        knob(ui, ok2(feature2::CAPTURE), "How the console grabs the screen. DMA works for Home Menu and homebrew but retail games deny it (black). GPU transfer is experimental — the attempt to capture protected game screens (not implemented yet).", |ui| {
+                            egui::ComboBox::from_label("Capture backend")
+                                .selected_text(match s.capture {
+                                    1 => "GPU transfer (experimental)",
+                                    _ => "DMA (default)",
+                                })
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut s.capture, 0u8, "DMA (default)");
+                                    ui.selectable_value(&mut s.capture, 1u8, "GPU transfer (experimental)");
+                                });
                         });
                         knob(ui, ok(feature::FPS_CAP), "Limits the capture rate, freeing 3DS CPU. 0 = uncapped.", |ui| {
                             ui.add(egui::Slider::new(&mut s.fps_cap, 0..=60).text("FPS cap"));

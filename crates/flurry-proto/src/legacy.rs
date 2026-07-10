@@ -46,12 +46,15 @@ pub mod setting {
     pub const V2_ENABLE: u8 = 0x0F; // u8 payload: bool — switch to protocol v2 framing
     pub const GRID_COLS: u8 = 0x10; // u8 payload: dirty-grid columns per screen (4/8/16)
     pub const GRID_ROWS: u8 = 0x11; // u8 payload: dirty-grid rows per screen (1/2/4/8)
+    pub const CAPTURE: u8 = 0x12; // u8 payload: capture backend (0 DMA, 1 GPU)
 }
 
 /// Second feature byte (announce payload byte 2; absent on older builds).
 pub mod feature2 {
     /// Dirty-grid geometry settings (GRID_COLS / GRID_ROWS).
     pub const CELL_GRID: u8 = 1 << 0;
+    /// Selectable capture backend (CAPTURE).
+    pub const CAPTURE: u8 = 1 << 1;
 }
 
 /// Feature bits carried by the [`meta::ANNOUNCE`] packet.
@@ -80,6 +83,10 @@ pub fn encode_grid_cols(cols: u8) -> Vec<u8> {
 
 pub fn encode_grid_rows(rows: u8) -> Vec<u8> {
     packet(pkt::SETTING, setting::GRID_ROWS, &[rows])
+}
+
+pub fn encode_capture(method: u8) -> Vec<u8> {
+    packet(pkt::SETTING, setting::CAPTURE, &[method])
 }
 
 /// Legacy screen-select values (1-based, unlike v1).

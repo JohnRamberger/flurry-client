@@ -31,6 +31,7 @@ pub enum Cmd {
     SetV2Enabled(bool),
     SetGridCols(u8),
     SetGridRows(u8),
+    SetCapture(u8),
     Disconnect,
 }
 
@@ -132,6 +133,7 @@ pub fn spawn(addr: String, ctx: egui::Context, quality: u8, screen: ScreenSet, i
                     Cmd::SetV2Enabled(e) => (legacy::encode_v2_enable(e), false),
                     Cmd::SetGridCols(c) => (legacy::encode_grid_cols(c), false),
                     Cmd::SetGridRows(r) => (legacy::encode_grid_rows(r), false),
+                    Cmd::SetCapture(m) => (legacy::encode_capture(m), false),
                     Cmd::Disconnect => (legacy::encode_disconnect(), true),
                 };
                 let _ = wr.write_all(&bytes);
