@@ -1256,12 +1256,6 @@ impl App {
                     ui.label(&self.stats);
                 });
         }
-        if ui
-            .button(format!("3DS log ({}) ⤢", self.log.len()))
-            .clicked()
-        {
-            self.show_log = !self.show_log;
-        }
     }
 
     /// Full scrollable 3DS log as a bottom panel: tail (auto-scroll),
@@ -1313,7 +1307,15 @@ impl eframe::App for App {
         });
 
         egui::Panel::bottom(egui::Id::new("statusbar")).show(ui, |ui| {
-            ui.small(&self.status);
+            ui.horizontal(|ui| {
+                ui.small(&self.status);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let label = format!("3DS log ({})", self.log.len());
+                    if ui.selectable_label(self.show_log, label).clicked() {
+                        self.show_log = !self.show_log;
+                    }
+                });
+            });
         });
 
         self.log_panel(ui);
